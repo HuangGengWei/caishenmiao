@@ -8,6 +8,12 @@ instrumentation-client.ts
 # Common ignores
 node_modules/
 .next/
+
+# Environment and secrets (never commit)
+.env
+.env.local
 .env*.local
+.env.development
+.env.production
 .DS_Store
 .vercel
