@@ -1,0 +1,43 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model SignalRecord {
+  id            Int      @id @default(autoincrement())
+  date          DateTime @db.Date
+  code          String   @db.VarChar(16)
+  name          String   @db.VarChar(64)
+  sector        String   @db.VarChar(255) // JSON 数组字符串，用「、」分隔
+  sectorPattern String?  @db.VarChar(32)  // "水下拉水上" | "波动三角收窄"
+  turnover      Float?
+  chg           Float?
+  amount        Float?
+  debtRatio     Float?   // 资产负债率 %
+  score         Int
+  reason        String   @db.Text         // JSON 数组字符串
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([date])
+  @@index([code])
+  @@map("signal_records")
+}
+
+model SectorScreenshot {
+  id        Int      @id @default(autoincrement())
+  date      DateTime @db.Date
+  sector    String   @db.VarChar(64)
+  imageData String   @db.LongText        // Data URL (base64)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([date, sector], name: "date_sector")
+  @@index([date])
+  @@map("sector_screenshots")
+}

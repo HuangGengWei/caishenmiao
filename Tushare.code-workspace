@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../Tushare"
+		},
+		{
+			"path": "../麦蕊数智"
+		},
+		{
+			"path": "../stock-website"
+		},
+		{
+			"path": "../storyboard"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
+}
