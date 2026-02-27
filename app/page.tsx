@@ -17,6 +17,7 @@ import {
 export default function Page() {
   const [activeTab, setActiveTab] = useState("history");
   const [allRecords, setAllRecords] = useState<SignalRecord[]>([]);
+  const [hasUnsavedInput, setHasUnsavedInput] = useState(false);
 
   useEffect(() => {
     getAllRecords().then(setAllRecords);
@@ -56,6 +57,14 @@ export default function Page() {
     [allRecords]
   );
 
+  function handleTabChange(next: string) {
+    if (activeTab === "history" && hasUnsavedInput && next !== "history") {
+      const ok = window.confirm("当前录入表格中有未保存的数据，确定要离开近30天汇总页面吗？");
+      if (!ok) return;
+    }
+    setActiveTab(next);
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -94,11 +103,7 @@ export default function Page() {
 
       {/* Main content */}
       <main className="mx-auto max-w-[140rem] w-full px-4 py-6 lg:px-6">
-        <Tabs
-          value={activeTab}
-          onValueChange={setActiveTab}
-          className="flex flex-col gap-6"
-        >
+        <Tabs value={activeTab} onValueChange={handleTabChange} className="flex flex-col gap-6">
           <TabsList className="bg-secondary border border-border self-start">
             <TabsTrigger
               value="ai"
@@ -132,6 +137,7 @@ export default function Page() {
               existingSectors={existingSectors}
               onClear={handleClear}
               onAddRecords={handleParsed}
+              onUnsavedChange={setHasUnsavedInput}
             />
           </TabsContent>
 

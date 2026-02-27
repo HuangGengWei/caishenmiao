@@ -214,6 +214,36 @@ export async function getDailyRange(
 }
 
 /**
+ * 从指定录入日之后（含当日）检查是否出现过涨停，返回首次涨停日期（YYYY-MM-DD），若无则返回 null
+ * 这里简单以日涨跌幅 pct_chg ≥ 9.8 视为涨停（忽略 ST/20cm 等特殊情况）
+ */
+export async function getFirstLimitUpSince(
+  code: string,
+  recordDate: string
+): Promise<string | null> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  const startDate = recordDate.replace(/-/g, "");
+  const today = new Date();
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  const endDate = fmt(today);
+
+  const rows = await getDailyRange(tsCode, startDate, endDate);
+  if (!rows || rows.length === 0) return null;
+
+  // 按日期正序，找到第一天涨跌幅达到阈值的记录
+  const sorted = [...rows].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+  const THRESHOLD = 9.8; // 近似 10% 涨停
+  const hit = sorted.find((r) => typeof r.pct_chg === "number" && r.pct_chg >= THRESHOLD);
+  if (!hit) return null;
+
+  const td = hit.trade_date;
+  return `${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`;
+}
+
+/**
  * 获取股票20日均线及最新价格信息
  * 逻辑：取最近 ~30 个交易日的日线数据，取最新20条计算 MA20，
  * 并判断最新交易日的收盘价/最高价是否达到或穿越 MA20。

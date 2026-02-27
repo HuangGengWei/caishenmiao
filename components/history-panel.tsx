@@ -28,6 +28,7 @@ interface HistoryPanelProps {
   existingSectors?: string[];
   onClear: () => void;
   onAddRecords?: (records: SignalRecord[]) => void;
+  onUnsavedChange?: (dirty: boolean) => void;
 }
 
 function getMonthDays(year: number, month: number) {
@@ -73,7 +74,13 @@ interface DayCellData {
   records: SignalRecord[];
 }
 
-export function HistoryPanel({ records, existingSectors = [], onClear, onAddRecords }: HistoryPanelProps) {
+export function HistoryPanel({
+  records,
+  existingSectors = [],
+  onClear,
+  onAddRecords,
+  onUnsavedChange,
+}: HistoryPanelProps) {
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
@@ -84,6 +91,7 @@ export function HistoryPanel({ records, existingSectors = [], onClear, onAddReco
     title: string;
   } | null>(null);
   const [inputOpen, setInputOpen] = useState(false);
+  const [hasUnsavedInput, setHasUnsavedInput] = useState(false);
   const [sectorShotVersion, setSectorShotVersion] = useState(0);
   const [sectorScreenshots, setSectorScreenshots] = useState<
     SectorScreenshot[]
@@ -768,7 +776,21 @@ export function HistoryPanel({ records, existingSectors = [], onClear, onAddReco
 
       {/* Signal input dialog (opened via double-click on calendar date) */}
       {onAddRecords && selectedDate && (
-        <Dialog open={inputOpen} onOpenChange={setInputOpen}>
+        <Dialog
+          open={inputOpen}
+          onOpenChange={(open) => {
+            if (!open && hasUnsavedInput) {
+              if (!window.confirm("检测到当前录入表格中有未保存的数据，确定要关闭吗？")) {
+                return;
+              }
+            }
+            setInputOpen(open);
+            if (!open) {
+              setHasUnsavedInput(false);
+              onUnsavedChange?.(false);
+            }
+          }}
+        >
           <DialogContent className="w-[95vw] max-w-[95vw] h-[90vh] max-h-[90vh] flex flex-col">
             <DialogHeader className="flex-shrink-0">
               <DialogTitle>信号数据录入</DialogTitle>
@@ -781,7 +803,15 @@ export function HistoryPanel({ records, existingSectors = [], onClear, onAddReco
                 onParsed={onAddRecords}
                 fixedDate={selectedDate}
                 existingSectors={existingSectors}
-                onSubmitted={() => setInputOpen(false)}
+                onSubmitted={() => {
+                  setInputOpen(false);
+                  setHasUnsavedInput(false);
+                  onUnsavedChange?.(false);
+                }}
+                onDirtyChange={(dirty) => {
+                  setHasUnsavedInput(dirty);
+                  onUnsavedChange?.(dirty);
+                }}
               />
             </div>
           </DialogContent>

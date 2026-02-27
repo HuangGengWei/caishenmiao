@@ -25,6 +25,7 @@ interface SignalInputProps {
   fixedDate?: string; // 如果提供，则锁定为该日期并隐藏头部日期选择
   onSubmitted?: () => void; // 成功提交后回调（例如关闭弹窗）
   existingSectors?: string[]; // 历史录入过的板块选项，用于下拉建议
+  onDirtyChange?: (dirty: boolean) => void; // 表单是否有未保存修改
 }
 
 interface RowData {
@@ -94,7 +95,13 @@ function rowToRecord(row: RowData, date: string): SignalRecord | null {
   };
 }
 
-export function SignalInput({ onParsed, fixedDate, onSubmitted, existingSectors = [] }: SignalInputProps) {
+export function SignalInput({
+  onParsed,
+  fixedDate,
+  onSubmitted,
+  existingSectors = [],
+  onDirtyChange,
+}: SignalInputProps) {
   const [date, setDate] = useState(
     () => fixedDate || new Date().toISOString().slice(0, 10)
   );
@@ -104,6 +111,8 @@ export function SignalInput({ onParsed, fixedDate, onSubmitted, existingSectors 
   const [error, setError] = useState<string | null>(null);
   const [loadingCodes, setLoadingCodes] = useState<Set<string>>(new Set());
   const codeTimeoutRefs = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const initialDateRef = useRef(date);
+  const dirtyRef = useRef(false);
 
   // 根据股票代码自动填充信息
   const fetchStockInfo = useCallback(
@@ -207,6 +216,33 @@ export function SignalInput({ onParsed, fixedDate, onSubmitted, existingSectors 
     };
   }, []);
 
+  // 当 fixedDate 变化时更新初始日期参考（例如切换了录入的日期）
+  useEffect(() => {
+    if (fixedDate) {
+      initialDateRef.current = fixedDate;
+    }
+  }, [fixedDate]);
+
+  // 计算表单是否“脏”并通知父组件
+  useEffect(() => {
+    const hasRowContent = rows.some((r) =>
+      r.code ||
+      r.name ||
+      r.sector ||
+      r.sector_pattern ||
+      r.turnover ||
+      r.chg ||
+      r.amount ||
+      r.debt_ratio
+    );
+    const dateChanged = !fixedDate && date !== initialDateRef.current;
+    const dirtyNow = hasRowContent || dateChanged;
+    if (dirtyRef.current !== dirtyNow) {
+      dirtyRef.current = dirtyNow;
+      onDirtyChange?.(dirtyNow);
+    }
+  }, [rows, date, fixedDate, onDirtyChange]);
+
   const addRow = useCallback(() => {
     setRows((prev) => [...prev, createEmptyRow()]);
   }, []);
@@ -274,6 +310,7 @@ export function SignalInput({ onParsed, fixedDate, onSubmitted, existingSectors 
       await onParsed(records);
       // 提交成功后清空表格
       setRows(Array.from({ length: 1 }, createEmptyRow));
+      initialDateRef.current = date;
       // 如有需要，通知父组件（例如关闭弹窗）
       if (onSubmitted) {
         onSubmitted();

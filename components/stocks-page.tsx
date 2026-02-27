@@ -12,6 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -29,7 +30,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { CandlestickChart } from "@/components/candlestick-chart";
-import type { SignalRecord } from "@/lib/types";
+import type { SignalRecord, SectorScreenshot } from "@/lib/types";
+import { getSectorScreenshot } from "@/lib/store";
 
 interface StocksPageProps {
   records: SignalRecord[];
@@ -39,11 +41,10 @@ type SortKey =
   | "date"
   | "code"
   | "name"
-  | "turnover"
-  | "chg"
   | "amount"
   | "debt_ratio"
-  | "tradingDays";
+  | "tradingDays"
+  | "limitUpDays";
 
 interface OhlcPoint {
   date: string;
@@ -80,11 +81,19 @@ interface Ma5Ma30Status {
   error?: string;
 }
 
+interface LimitUpInfo {
+  limitUpDate: string | null;
+  loading: boolean;
+  error?: string;
+}
+
 export function StocksPage({ records }: StocksPageProps) {
   const [search, setSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("all");
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [pageSize, setPageSize] = useState<"10" | "20" | "50" | "all">("10");
+  const [pageIndex, setPageIndex] = useState(0);
 
   // 交易日历：存储所有已知交易日（YYYY-MM-DD），用于计算交易天数
   const [tradingDays, setTradingDays] = useState<string[]>([]);
@@ -144,6 +153,21 @@ export function StocksPage({ records }: StocksPageProps) {
     },
     [tradingDays]
   );
+
+  // 录入日到目标日期（含）的交易天数，用于“第几天涨停”
+  const calcTradingDaysBetween = useCallback(
+    (recordDate: string, targetDate: string): number | null => {
+      if (tradingDays.length === 0) return null;
+      return tradingDays.filter((d) => d >= recordDate && d <= targetDate).length;
+    },
+    [tradingDays]
+  );
+
+  // 涨停信息
+  const [limitUpMap, setLimitUpMap] = useState<Record<string, LimitUpInfo>>({});
+  // 板块分时截图缓存 & 预览（使用右下角浮层展示）
+  const sectorShotCache = useRef<Map<string, SectorScreenshot | null>>(new Map());
+  const [hoverPreview, setHoverPreview] = useState<{ url: string; title: string } | null>(null);
 
   const fetchMa20 = useCallback(async (code: string) => {
     setMa20Map((prev) => ({
@@ -273,22 +297,51 @@ export function StocksPage({ records }: StocksPageProps) {
     }
   }, []);
 
-  // 自动查询：records 变化时，对所有去重代码触发 MA20 / MA5-MA30 查询（跳过已有数据的）
-  const fetchedRef = useRef<Set<string>>(new Set());
-  const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const codes = Array.from(new Set(records.map((r) => r.code)));
-    for (const code of codes) {
-      if (!fetchedRef.current.has(code)) {
-        fetchedRef.current.add(code);
-        fetchMa20(code);
+  const fetchLimitUp = useCallback(
+    async (code: string, recordDate: string) => {
+      const key = `${code}-${recordDate}`;
+      setLimitUpMap((prev) => ({
+        ...prev,
+        [key]: {
+          limitUpDate: null,
+          loading: true,
+        },
+      }));
+      try {
+        const params = new URLSearchParams({ code, recordDate });
+        const res = await fetch(`/api/tushare/limit-up?${params.toString()}`);
+        const data = await res.json();
+        if (!res.ok) {
+          setLimitUpMap((prev) => ({
+            ...prev,
+            [key]: {
+              limitUpDate: null,
+              loading: false,
+              error: data.error || "获取失败",
+            },
+          }));
+          return;
+        }
+        setLimitUpMap((prev) => ({
+          ...prev,
+          [key]: {
+            limitUpDate: data.limitUpDate ?? null,
+            loading: false,
+          },
+        }));
+      } catch (e: any) {
+        setLimitUpMap((prev) => ({
+          ...prev,
+          [key]: {
+            limitUpDate: null,
+            loading: false,
+            error: e?.message || "网络请求失败",
+          },
+        }));
       }
-      if (!fetchedMa5Ma30Ref.current.has(code)) {
-        fetchedMa5Ma30Ref.current.add(code);
-        fetchDailyChart(code);
-      }
-    }
-  }, [records, fetchMa20, fetchDailyChart]);
+    },
+    []
+  );
 
   const allSectors = useMemo(() => {
     const set = new Set<string>();
@@ -331,14 +384,6 @@ export function StocksPage({ records }: StocksPageProps) {
           av = a.name;
           bv = b.name;
           break;
-        case "turnover":
-          av = a.turnover;
-          bv = b.turnover;
-          break;
-        case "chg":
-          av = a.chg;
-          bv = b.chg;
-          break;
         case "amount":
           av = a.amount;
           bv = b.amount;
@@ -354,6 +399,16 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = tb;
           break;
         }
+        case "limitUpDays": {
+          const getDays = (r: SignalRecord): number | null => {
+            const info = limitUpMap[`${r.code}-${r.date}`];
+            if (!info || info.loading || !info.limitUpDate) return null;
+            return calcTradingDaysBetween(r.date, info.limitUpDate);
+          };
+          av = getDays(a);
+          bv = getDays(b);
+          break;
+        }
       }
       if (av === null && bv === null) return 0;
       if (av === null) return 1;
@@ -364,14 +419,64 @@ export function StocksPage({ records }: StocksPageProps) {
     });
 
     return list;
-  }, [records, search, sectorFilter, sortKey, sortDir, calcTradingDays]);
+  }, [records, search, sectorFilter, sortKey, sortDir, calcTradingDays, calcTradingDaysBetween, limitUpMap]);
+
+  const visibleRecords = useMemo(() => {
+    if (filtered.length === 0) return [];
+    if (pageSize === "all") {
+      return filtered;
+    }
+    const limit = Number(pageSize);
+    const start = pageIndex * limit;
+    const end = start + limit;
+    return filtered.slice(start, end);
+  }, [filtered, pageSize, pageIndex]);
+
+  // 当过滤条件或页大小变化时，重置或校正页码
+  useEffect(() => {
+    setPageIndex(0);
+  }, [search, sectorFilter, sortKey, sortDir, pageSize]);
+
+  useEffect(() => {
+    if (pageSize === "all") return;
+    const limit = Number(pageSize);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / (limit || 1)));
+    setPageIndex((prev) => Math.min(prev, totalPages - 1));
+  }, [filtered.length, pageSize]);
+
+  // 自动查询：列表数据变化时，对当前展示的记录触发 MA20 / MA5-MA30，
+  // 对「涨停情况排序」时会对所有过滤后的记录触发涨停查询（避免对全部历史记录打满 API 的同时保证排序正确）
+  const fetchedRef = useRef<Set<string>>(new Set());
+  const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
+  const fetchedLimitUpRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const codes = Array.from(new Set(visibleRecords.map((r) => r.code)));
+    for (const code of codes) {
+      if (!fetchedRef.current.has(code)) {
+        fetchedRef.current.add(code);
+        fetchMa20(code);
+      }
+      if (!fetchedMa5Ma30Ref.current.has(code)) {
+        fetchedMa5Ma30Ref.current.add(code);
+        fetchDailyChart(code);
+      }
+    }
+    const baseForLimitUp = sortKey === "limitUpDays" ? filtered : visibleRecords;
+    for (const r of baseForLimitUp) {
+      const key = `${r.code}-${r.date}`;
+      if (!fetchedLimitUpRef.current.has(key)) {
+        fetchedLimitUpRef.current.add(key);
+        fetchLimitUp(r.code, r.date);
+      }
+    }
+  }, [visibleRecords, filtered, sortKey, fetchMa20, fetchDailyChart, fetchLimitUp]);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir("desc");
+      setSortDir(key === "limitUpDays" ? "asc" : "desc");
     }
   }
 
@@ -571,6 +676,134 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
+  function LimitUpCell({ code, date }: { code: string; date: string }) {
+    const key = `${code}-${date}`;
+    const info = limitUpMap[key];
+
+    if (!info) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
+    }
+    if (info.loading) {
+      return (
+        <span className="text-xs text-muted-foreground animate-pulse">
+          查询中…
+        </span>
+      );
+    }
+    if (info.error) {
+      return (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs text-destructive font-medium">查询失败</span>
+          <span className="text-[10px] text-destructive/70 max-w-[160px] break-words leading-tight">
+            {info.error}
+          </span>
+          <button
+            onClick={() => fetchLimitUp(code, date)}
+            className="text-[10px] text-primary underline-offset-2 hover:underline text-left mt-0.5"
+          >
+            重试
+          </button>
+        </div>
+      );
+    }
+
+    if (!info.limitUpDate) {
+      return (
+        <Badge
+          variant="outline"
+          className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground border-dashed"
+        >
+          暂无涨停
+        </Badge>
+      );
+    }
+
+    const days = calcTradingDaysBetween(date, info.limitUpDate);
+    const highlightClass =
+      days != null && days <= 3
+        ? "bg-stock-up/15 text-stock-up border-stock-up/40"
+        : days != null && days <= 10
+          ? "bg-primary/15 text-primary border-primary/40"
+          : "bg-secondary/40 text-foreground border-border/70";
+
+    let positionPercent = 60;
+    if (days != null && days > 0) {
+      const clamped = Math.min(days, 20);
+      positionPercent = (clamped / 20) * 100;
+    }
+
+    return (
+      <div className="flex flex-col gap-1 min-w-[220px]">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <Badge
+            className={`text-[10px] px-1.5 py-0 h-5 font-semibold border ${highlightClass}`}
+          >
+            已涨停
+          </Badge>
+          {days != null && (
+            <span className="text-[11px] text-muted-foreground font-mono">
+              第 {days} 个交易日
+            </span>
+          )}
+        </div>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono">
+            <span>{date}</span>
+            <span>{info.limitUpDate}</span>
+          </div>
+          <div className="relative h-7">
+            <div className="absolute left-0 right-0 top-1/2 h-px bg-border" />
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-muted-foreground" />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-stock-up"
+              style={{ left: `${positionPercent}%` }}
+            />
+            {days != null && (
+              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[10px] text-muted-foreground whitespace-nowrap">
+                ≈ {days} 个交易日
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  async function handleSectorPatternHover(record: SignalRecord) {
+    if (!record.sector || record.sector.length === 0) {
+      setHoverPreview(null);
+      return;
+    }
+    const sectorName = record.sector[0];
+    const cacheKey = `${record.date}|${sectorName}`;
+    if (sectorShotCache.current.has(cacheKey)) {
+      const cached = sectorShotCache.current.get(cacheKey);
+      if (cached?.imageDataUrl) {
+        setHoverPreview({
+          url: cached.imageDataUrl,
+          title: `${record.date} ${sectorName}`,
+        });
+      } else {
+        setHoverPreview(null);
+      }
+      return;
+    }
+    try {
+      const shot = await getSectorScreenshot(record.date, sectorName);
+      sectorShotCache.current.set(cacheKey, shot);
+      if (shot?.imageDataUrl) {
+        setHoverPreview({
+          url: shot.imageDataUrl,
+          title: `${record.date} ${sectorName}`,
+        });
+      } else {
+        setHoverPreview(null);
+      }
+    } catch {
+      setHoverPreview(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Card className="border-border bg-card">
@@ -578,7 +811,7 @@ export function StocksPage({ records }: StocksPageProps) {
           <CardTitle className="text-lg font-semibold text-foreground">
             个股列表
             <span className="text-sm font-normal text-muted-foreground ml-2">
-              共 {filtered.length} / {records.length} 条
+              显示 {visibleRecords.length} / {filtered.length} 条（总 {records.length} 条）
             </span>
           </CardTitle>
         </CardHeader>
@@ -607,6 +840,25 @@ export function StocksPage({ records }: StocksPageProps) {
                     {s}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+            <Select value={pageSize} onValueChange={(v) => setPageSize(v as "10" | "20" | "50" | "all")}>
+              <SelectTrigger className="w-32 bg-secondary text-foreground border-border text-sm">
+                <SelectValue placeholder="显示数量" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border text-foreground">
+                <SelectItem value="10" className="text-sm focus:bg-secondary focus:text-foreground">
+                  显示 10 条
+                </SelectItem>
+                <SelectItem value="20" className="text-sm focus:bg-secondary focus:text-foreground">
+                  显示 20 条
+                </SelectItem>
+                <SelectItem value="50" className="text-sm focus:bg-secondary focus:text-foreground">
+                  显示 50 条
+                </SelectItem>
+                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
+                  显示全部
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -642,18 +894,6 @@ export function StocksPage({ records }: StocksPageProps) {
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground text-right cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("turnover")}
-                  >
-                    换手率<SortIcon col="turnover" />
-                  </TableHead>
-                  <TableHead
-                    className="text-muted-foreground text-right cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("chg")}
-                  >
-                    涨跌幅<SortIcon col="chg" />
-                  </TableHead>
-                  <TableHead
-                    className="text-muted-foreground text-right cursor-pointer select-none whitespace-nowrap hover:text-foreground"
                     onClick={() => handleSort("amount")}
                   >
                     市值(亿)<SortIcon col="amount" />
@@ -669,6 +909,13 @@ export function StocksPage({ records }: StocksPageProps) {
                     onClick={() => handleSort("tradingDays")}
                   >
                     交易天数<SortIcon col="tradingDays" />
+                  </TableHead>
+                  <TableHead
+                    className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
+                    onClick={() => handleSort("limitUpDays")}
+                  >
+                    涨停情况
+                    <SortIcon col="limitUpDays" />
                   </TableHead>
                   <TableHead className="text-muted-foreground whitespace-nowrap">
                     5日/30日线
@@ -692,14 +939,14 @@ export function StocksPage({ records }: StocksPageProps) {
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={13}
+                      colSpan={12}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filtered.map((r, i) => {
+                  visibleRecords.map((r, i) => {
                     const days = calcTradingDays(r.date);
                     return (
                       <TableRow
@@ -738,30 +985,14 @@ export function StocksPage({ records }: StocksPageProps) {
                                   ? "border-stock-up/50 text-stock-up bg-stock-up/10"
                                   : "border-primary/50 text-primary bg-primary/10"
                               }`}
+                              onMouseEnter={() => handleSectorPatternHover(r)}
+                              onMouseLeave={() => setHoverPreview(null)}
                             >
                               {r.sector_pattern}
                             </span>
                           ) : (
                             <span className="text-muted-foreground text-xs">-</span>
                           )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm whitespace-nowrap">
-                          {r.turnover != null ? `${r.turnover}%` : "-"}
-                        </TableCell>
-                        <TableCell
-                          className={`text-right font-mono text-sm whitespace-nowrap ${
-                            r.chg != null
-                              ? r.chg > 0
-                                ? "text-stock-down"
-                                : r.chg < 0
-                                  ? "text-stock-up"
-                                  : "text-foreground"
-                              : "text-muted-foreground"
-                          }`}
-                        >
-                          {r.chg != null
-                            ? `${r.chg > 0 ? "+" : ""}${r.chg}%`
-                            : "-"}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm whitespace-nowrap">
                           {r.amount != null ? r.amount : "-"}
@@ -787,6 +1018,9 @@ export function StocksPage({ records }: StocksPageProps) {
                           )}
                         </TableCell>
                         <TableCell>
+                          <LimitUpCell code={r.code} date={r.date} />
+                        </TableCell>
+                        <TableCell>
                           <Ma5Ma30Cell code={r.code} />
                         </TableCell>
                         <TableCell>
@@ -799,8 +1033,68 @@ export function StocksPage({ records }: StocksPageProps) {
               </TableBody>
             </Table>
           </div>
+
+          {/* 分页器 */}
+          {pageSize !== "all" && filtered.length > Number(pageSize) && (
+            <div className="flex items-center justify-between mt-3 text-xs text-muted-foreground">
+              <div>
+                第{" "}
+                <span className="font-mono text-foreground">
+                  {pageIndex + 1}
+                </span>
+                {" / "}
+                <span className="font-mono text-foreground">
+                  {Math.ceil(filtered.length / Number(pageSize))}
+                </span>{" "}
+                页
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7 px-0 text-xs"
+                  disabled={pageIndex === 0}
+                  onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+                >
+                  ‹
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7 px-0 text-xs"
+                  disabled={pageSize === "all" || pageIndex >= Math.ceil(filtered.length / Number(pageSize)) - 1}
+                  onClick={() =>
+                    setPageIndex((p) =>
+                      pageSize === "all"
+                        ? 0
+                        : Math.min(
+                            Math.ceil(filtered.length / Number(pageSize)) - 1,
+                            p + 1
+                          )
+                    )
+                  }
+                >
+                  ›
+                </Button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
+      {hoverPreview && (
+        <div className="fixed bottom-4 right-4 z-40 rounded-md border border-border bg-background/95 shadow-xl px-3 py-2 max-w-[420px] max-h-[260px]">
+          <div className="text-[11px] text-muted-foreground mb-1 truncate">
+            {hoverPreview.title}
+          </div>
+          <div className="max-h-[220px] overflow-hidden">
+            <img
+              src={hoverPreview.url}
+              alt={hoverPreview.title}
+              className="w-full h-auto object-contain"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

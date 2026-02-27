@@ -49,12 +49,6 @@ export function SignalTable({
                 <TableHead className="text-muted-foreground text-center">
                   板块分时
                 </TableHead>
-                <TableHead className="text-muted-foreground text-right">
-                  换手率
-                </TableHead>
-                <TableHead className="text-muted-foreground text-right">
-                  涨跌幅
-                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -99,24 +93,6 @@ export function SignalTable({
                     ) : (
                       <span className="text-muted-foreground text-xs">-</span>
                     )}
-                  </TableCell>
-                  <TableCell className="text-right font-mono text-sm">
-                    {r.turnover != null ? `${r.turnover}%` : "-"}
-                  </TableCell>
-                  <TableCell
-                    className={`text-right font-mono text-sm ${
-                      r.chg != null
-                        ? r.chg > 0
-                          ? "text-stock-down"
-                          : r.chg < 0
-                            ? "text-stock-up"
-                            : "text-foreground"
-                        : "text-muted-foreground"
-                    }`}
-                  >
-                    {r.chg != null
-                      ? `${r.chg > 0 ? "+" : ""}${r.chg}%`
-                      : "-"}
                   </TableCell>
                 </TableRow>
               ))}
