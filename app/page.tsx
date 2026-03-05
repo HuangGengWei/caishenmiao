@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { Landmark } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ReviewAI } from "@/components/review-ai";
+import { DeliveryPanel } from "@/components/delivery-panel";
 import { StocksPage } from "@/components/stocks-page";
 import { HistoryPanel } from "@/components/history-panel";
 import type { SignalRecord } from "@/lib/types";
@@ -59,8 +59,7 @@ export default function Page() {
 
   function handleTabChange(next: string) {
     if (activeTab === "history" && hasUnsavedInput && next !== "history") {
-      const ok = window.confirm("当前录入表格中有未保存的数据，确定要离开近30天汇总页面吗？");
-      if (!ok) return;
+      if (!window.confirm("当前录入表格中有未保存的数据，确定要离开近30天汇总页面吗？")) return;
     }
     setActiveTab(next);
   }
@@ -106,10 +105,10 @@ export default function Page() {
         <Tabs value={activeTab} onValueChange={handleTabChange} className="flex flex-col gap-6">
           <TabsList className="bg-secondary border border-border self-start">
             <TabsTrigger
-              value="ai"
+              value="delivery"
               className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
             >
-              复盘智囊
+              交割单
             </TabsTrigger>
             <TabsTrigger
               value="history"
@@ -125,9 +124,9 @@ export default function Page() {
             </TabsTrigger>
           </TabsList>
 
-          {/* 复盘智囊 tab */}
-          <TabsContent value="ai" className="mt-0">
-            <ReviewAI records={allRecords} />
+          {/* 交割单 tab */}
+          <TabsContent value="delivery" className="mt-0">
+            <DeliveryPanel />
           </TabsContent>
 
           {/* History tab */}

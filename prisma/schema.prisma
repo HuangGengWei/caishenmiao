@@ -41,3 +41,36 @@ model SectorScreenshot {
   @@index([date])
   @@map("sector_screenshots")
 }
+
+model DeliveryBatch {
+  id        Int              @id @default(autoincrement())
+  name      String           @db.VarChar(128)  // 如 "2023年交割单"
+  sourceFileName String?     @map("source_file_name") @db.VarChar(255)
+  createdAt DateTime         @default(now()) @map("created_at")
+  records   DeliveryRecord[]
+
+  @@map("delivery_batches")
+}
+
+model DeliveryRecord {
+  id        Int      @id @default(autoincrement())
+  batchId   Int?     @map("batch_id")
+  date      DateTime @db.Date
+  code      String   @db.VarChar(16)
+  name      String   @db.VarChar(64)
+  direction String   @db.VarChar(8)   // 买 / 卖
+  quantity  Int
+  price     Float
+  amount    Float
+  fee       Float?
+  tax       Float?
+  remark    String?  @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  batch     DeliveryBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([date])
+  @@index([code])
+  @@index([batchId])
+  @@map("delivery_records")
+}

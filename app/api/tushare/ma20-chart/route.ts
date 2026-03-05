@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMA20WithOhlc } from "@/lib/tushare";
+import { getMA20WithOhlc, getMA20WithOhlcAroundRecord } from "@/lib/tushare";
 
 /**
- * GET /api/tushare/ma20-chart?code=xxxxxx
- * 返回 MA20 状态 + 近30个交易日 OHLC（用于蜡烛图）
+ * GET /api/tushare/ma20-chart?code=xxxxxx&recordDate=YYYY-MM-DD
+ * recordDate 可选；若传则返回以录入日为基准的 OHLC（便于图中标注录入日与涨停日）
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const code = searchParams.get("code");
+  const recordDate = searchParams.get("recordDate");
 
   if (!code) {
     return NextResponse.json(
@@ -17,7 +18,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await getMA20WithOhlc(code);
+    const result = recordDate
+      ? await getMA20WithOhlcAroundRecord(code, recordDate)
+      : await getMA20WithOhlc(code);
     if (!result) {
       return NextResponse.json(
         { error: `未获取到 ${code} 的数据或日线不足` },

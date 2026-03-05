@@ -46,3 +46,19 @@ export interface SectorScreenshot {
   sector: string; // 板块名称（需与 SignalRecord.sector 中一致）
   imageDataUrl: string;
 }
+
+// 交割单一条记录
+export interface DeliveryRecord {
+  id?: number;
+  batchId?: number;
+  date: string;       // YYYY-MM-DD
+  code: string;
+  name: string;
+  direction: "买" | "卖";
+  quantity: number;
+  price: number;
+  amount: number;
+  fee?: number | null;
+  tax?: number | null;
+  remark?: string | null;
+}

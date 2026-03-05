@@ -243,6 +243,41 @@ export async function getFirstLimitUpSince(
   return `${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`;
 }
 
+/** 获取录入日前后涨停日期列表（以录入日为 midpoint，前后各取若干交易日） */
+export async function getLimitUpDatesAround(
+  code: string,
+  recordDate: string,
+  beforeDays = 30,
+  afterDays = 60
+): Promise<string[]> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  const recordYmd = recordDate.replace(/-/g, "");
+  const today = new Date();
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  const endDate = fmt(today);
+
+  const start = new Date(recordDate);
+  start.setDate(start.getDate() - 90);
+  const startDate = fmt(start);
+
+  const rows = await getDailyRange(tsCode, startDate, endDate);
+  if (!rows || rows.length === 0) return [];
+
+  const THRESHOLD = 9.8;
+  const sorted = [...rows].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+  const result: string[] = [];
+  for (const r of sorted) {
+    if (typeof r.pct_chg === "number" && r.pct_chg >= THRESHOLD) {
+      const td = r.trade_date;
+      result.push(`${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`);
+    }
+  }
+  return result;
+}
+
 /**
  * 获取股票20日均线及最新价格信息
  * 逻辑：取最近 ~30 个交易日的日线数据，取最新20条计算 MA20，
@@ -365,6 +400,69 @@ export async function getMA20WithOhlc(code: string): Promise<{
     low: Math.round(r.low * 100) / 100,
     close: Math.round(r.close * 100) / 100,
   }));
+
+  return {
+    ma20: Math.round(ma20 * 100) / 100,
+    latestClose: Math.round(latestClose * 100) / 100,
+    latestHigh: Math.round(latestHigh * 100) / 100,
+    latestTradeDate,
+    status,
+    ohlc,
+  };
+}
+
+/**
+ * 以录入日为基准的 20 日线 OHLC：从录入日前约20个交易日至今日，用于蜡烛图标注录入日/涨停日
+ */
+export async function getMA20WithOhlcAroundRecord(
+  code: string,
+  recordDate: string
+): Promise<{
+  ma20: number;
+  latestClose: number;
+  latestHigh: number;
+  latestTradeDate: string;
+  status: "above" | "touched" | "below";
+  ohlc: OhlcPoint[];
+} | null> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  const recordYmd = recordDate.replace(/-/g, "");
+  const today = new Date();
+  const start = new Date(recordDate);
+  start.setDate(start.getDate() - 90);
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const rows = await getDailyRange(tsCode, fmt(start), fmt(today));
+  if (!rows || rows.length < 20) return null;
+
+  const sorted = [...rows].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+  const recordIdx = sorted.findIndex((r) => r.trade_date === recordYmd);
+  const startIdx = recordIdx >= 0 ? Math.max(0, recordIdx - 20) : 0;
+  const use = sorted.slice(startIdx, Math.min(startIdx + 65, sorted.length));
+  if (use.length < 5) return null;
+
+  const ohlc: OhlcPoint[] = use.map((r) => ({
+    date: `${r.trade_date.slice(0, 4)}-${r.trade_date.slice(4, 6)}-${r.trade_date.slice(6, 8)}`,
+    open: Math.round(r.open * 100) / 100,
+    high: Math.round(r.high * 100) / 100,
+    low: Math.round(r.low * 100) / 100,
+    close: Math.round(r.close * 100) / 100,
+  }));
+
+  const last20 = use.slice(-20);
+  const ma20 = last20.reduce((sum, r) => sum + r.close, 0) / 20;
+  const latest = use[use.length - 1];
+  const latestClose = latest.close;
+  const latestHigh = latest.high;
+  const latestTradeDate = `${latest.trade_date.slice(0, 4)}-${latest.trade_date.slice(4, 6)}-${latest.trade_date.slice(6, 8)}`;
+
+  let status: "above" | "touched" | "below";
+  if (latestClose >= ma20) status = "above";
+  else if (latestHigh >= ma20) status = "touched";
+  else status = "below";
 
   return {
     ma20: Math.round(ma20 * 100) / 100,

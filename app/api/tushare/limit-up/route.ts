@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getFirstLimitUpSince } from "@/lib/tushare";
+import { getFirstLimitUpSince, getLimitUpDatesAround } from "@/lib/tushare";
 
 /**
- * GET /api/tushare/limit-up?code=xxxxxx&recordDate=YYYY-MM-DD
- * 返回：{ limitUpDate: string | null }
+ * GET /api/tushare/limit-up?code=xxxxxx&recordDate=YYYY-MM-DD&extended=1
+ * 返回：{ limitUpDate: string | null, limitUpDates?: string[] }
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const code = searchParams.get("code");
   const recordDate = searchParams.get("recordDate");
+  const extended = searchParams.get("extended") === "1";
 
   if (!code || !recordDate) {
     return NextResponse.json(
@@ -19,7 +20,12 @@ export async function GET(req: NextRequest) {
 
   try {
     const limitUpDate = await getFirstLimitUpSince(code, recordDate);
-    return NextResponse.json({ limitUpDate });
+    const result: { limitUpDate: string | null; limitUpDates?: string[] } = { limitUpDate };
+    if (extended) {
+      const limitUpDates = await getLimitUpDatesAround(code, recordDate);
+      result.limitUpDates = limitUpDates;
+    }
+    return NextResponse.json(result);
   } catch (error: any) {
     console.error(
       `GET /api/tushare/limit-up [${code} ${recordDate}] error:`,

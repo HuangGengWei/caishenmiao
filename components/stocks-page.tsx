@@ -44,7 +44,9 @@ type SortKey =
   | "amount"
   | "debt_ratio"
   | "tradingDays"
-  | "limitUpDays";
+  | "limitUpDays"
+  | "maProximity"
+  | "ma20Proximity";
 
 interface OhlcPoint {
   date: string;
@@ -83,8 +85,17 @@ interface Ma5Ma30Status {
 
 interface LimitUpInfo {
   limitUpDate: string | null;
+  limitUpDates?: string[]; // 录入日前后涨停日期列表
   loading: boolean;
   error?: string;
+}
+
+/** 东方财富个股页 URL：沪 sh、深 sz、京 bj */
+function eastmoneyQuoteUrl(code: string): string {
+  const c = String(code).replace(/\D/g, "").padStart(6, "0");
+  if (c.startsWith("6") || c.startsWith("5")) return `https://quote.eastmoney.com/sh${c}.html`;
+  if (c.startsWith("4") || c.startsWith("8")) return `https://quote.eastmoney.com/bj${c}.html`;
+  return `https://quote.eastmoney.com/sz${c}.html`;
 }
 
 export function StocksPage({ records }: StocksPageProps) {
@@ -154,11 +165,17 @@ export function StocksPage({ records }: StocksPageProps) {
     [tradingDays]
   );
 
-  // 录入日到目标日期（含）的交易天数，用于“第几天涨停”
+  // 录入日到目标日期的相对交易天数：目标晚于录入日为正(D+N)，早于录入日为负(D-N)，当日为 0
   const calcTradingDaysBetween = useCallback(
     (recordDate: string, targetDate: string): number | null => {
       if (tradingDays.length === 0) return null;
-      return tradingDays.filter((d) => d >= recordDate && d <= targetDate).length;
+      if (targetDate === recordDate) return 0;
+      if (targetDate > recordDate) {
+        return tradingDays.filter((d) => d >= recordDate && d <= targetDate).length;
+      }
+      // 目标在录入日前：中间交易日个数取负，即 D-N
+      const n = tradingDays.filter((d) => d > targetDate && d <= recordDate).length;
+      return -n;
     },
     [tradingDays]
   );
@@ -308,7 +325,7 @@ export function StocksPage({ records }: StocksPageProps) {
         },
       }));
       try {
-        const params = new URLSearchParams({ code, recordDate });
+        const params = new URLSearchParams({ code, recordDate, extended: "1" });
         const res = await fetch(`/api/tushare/limit-up?${params.toString()}`);
         const data = await res.json();
         if (!res.ok) {
@@ -326,6 +343,7 @@ export function StocksPage({ records }: StocksPageProps) {
           ...prev,
           [key]: {
             limitUpDate: data.limitUpDate ?? null,
+            limitUpDates: data.limitUpDates ?? [],
             loading: false,
           },
         }));
@@ -409,6 +427,36 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = getDays(b);
           break;
         }
+        case "maProximity": {
+          const getProximity = (r: SignalRecord): number | null => {
+            const s = ma5ma30Map[r.code];
+            if (!s || !s.series || s.series.length === 0) return null;
+            const latest = s.series[s.series.length - 1];
+            if (
+              latest.ma5 == null ||
+              latest.ma30 == null ||
+              latest.ma5 <= 0 ||
+              latest.ma30 <= 0
+            ) {
+              return null;
+            }
+            const minMa = Math.min(latest.ma5, latest.ma30);
+            return Math.abs(latest.ma5 - latest.ma30) / minMa;
+          };
+          av = getProximity(a);
+          bv = getProximity(b);
+          break;
+        }
+        case "ma20Proximity": {
+          const getProximity = (r: SignalRecord): number | null => {
+            const s = ma20Map[r.code];
+            if (!s || s.ma20 == null || s.latestClose == null || s.ma20 <= 0) return null;
+            return Math.abs(s.latestClose - s.ma20) / s.ma20;
+          };
+          av = getProximity(a);
+          bv = getProximity(b);
+          break;
+        }
       }
       if (av === null && bv === null) return 0;
       if (av === null) return 1;
@@ -419,7 +467,18 @@ export function StocksPage({ records }: StocksPageProps) {
     });
 
     return list;
-  }, [records, search, sectorFilter, sortKey, sortDir, calcTradingDays, calcTradingDaysBetween, limitUpMap]);
+  }, [
+    records,
+    search,
+    sectorFilter,
+    sortKey,
+    sortDir,
+    calcTradingDays,
+    calcTradingDaysBetween,
+    limitUpMap,
+    ma5ma30Map,
+    ma20Map,
+  ]);
 
   const visibleRecords = useMemo(() => {
     if (filtered.length === 0) return [];
@@ -444,13 +503,16 @@ export function StocksPage({ records }: StocksPageProps) {
     setPageIndex((prev) => Math.min(prev, totalPages - 1));
   }, [filtered.length, pageSize]);
 
-  // 自动查询：列表数据变化时，对当前展示的记录触发 MA20 / MA5-MA30，
-  // 对「涨停情况排序」时会对所有过滤后的记录触发涨停查询（避免对全部历史记录打满 API 的同时保证排序正确）
+  // 自动查询：
+  // - 对当前展示记录触发 MA20 / MA5-MA30
+  // - 当排序依据是“涨停天数”或“MA 接近程度”时，对过滤后的全集触发对应查询，保证排序基于全集数据
   const fetchedRef = useRef<Set<string>>(new Set());
   const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
   const fetchedLimitUpRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const codes = Array.from(new Set(visibleRecords.map((r) => r.code)));
+    const baseForMa =
+      sortKey === "maProximity" || sortKey === "ma20Proximity" ? filtered : visibleRecords;
+    const codes = Array.from(new Set(baseForMa.map((r) => r.code)));
     for (const code of codes) {
       if (!fetchedRef.current.has(code)) {
         fetchedRef.current.add(code);
@@ -476,7 +538,12 @@ export function StocksPage({ records }: StocksPageProps) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir(key === "limitUpDays" ? "asc" : "desc");
+      // 涨停天数 & MA 接近程度都是“数值越小越好”，默认升序；其它默认降序
+      setSortDir(
+        key === "limitUpDays" || key === "maProximity" || key === "ma20Proximity"
+          ? "asc"
+          : "desc"
+      );
     }
   }
 
@@ -497,9 +564,7 @@ export function StocksPage({ records }: StocksPageProps) {
     }
     if (s.loading) {
       return (
-        <span className="text-xs text-muted-foreground animate-pulse">
-          查询中…
-        </span>
+        <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>
       );
     }
     if (s.error) {
@@ -521,7 +586,6 @@ export function StocksPage({ records }: StocksPageProps) {
     if (s.ma20 === null && (!s.ohlc || s.ohlc.length === 0)) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
-
     const statusBadge =
       s.status === "above" ? (
         <Badge className="text-[10px] px-1.5 py-0 h-5 bg-stock-up/20 text-stock-up border border-stock-up/40 font-semibold">
@@ -536,7 +600,6 @@ export function StocksPage({ records }: StocksPageProps) {
           未达到
         </Badge>
       ) : null;
-
     const hasChart = s.ohlc && s.ohlc.length > 0;
     return (
       <div className="flex flex-col gap-0.5 min-w-[200px]">
@@ -570,6 +633,105 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
+  /** 涨停情况：以录入日为中心，显示多个涨停日期及相对天数（正数=录入日后，负数=录入日前） */
+  function LimitUpCell({ code, recordDate }: { code: string; recordDate: string }) {
+    const key = `${code}-${recordDate}`;
+    const info = limitUpMap[key];
+    if (!info) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
+    }
+    if (info.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
+    }
+    if (info.error) {
+      return (
+        <span className="text-[10px] text-destructive" title={info.error}>
+          查询失败
+        </span>
+      );
+    }
+    const dates = info.limitUpDates ?? [];
+    if (dates.length === 0) {
+      return <span className="text-xs text-muted-foreground">暂无涨停</span>;
+    }
+    const before: string[] = [];
+    const record: string[] = [];
+    const after: string[] = [];
+    for (const d of dates) {
+      const days = calcTradingDaysBetween(recordDate, d);
+      if (days === null) continue;
+      if (days < 0) before.push(d);
+      else if (days === 0) record.push(d);
+      else after.push(d);
+    }
+    before.sort((a, b) => a.localeCompare(b));
+    record.sort((a, b) => a.localeCompare(b));
+    after.sort((a, b) => a.localeCompare(b));
+
+    const renderTag = (
+      d: string,
+      dayLabel: string,
+      style: "before" | "record" | "after"
+    ) => {
+      const isRecord = style === "record";
+      const classMap = {
+        before:
+          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-400",
+        record:
+          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border-2 border-primary bg-primary/20 text-primary font-semibold ring-1 ring-primary/30",
+        after:
+          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border border-stock-up/50 bg-stock-up/15 text-stock-up",
+      };
+      return (
+        <span
+          key={d}
+          className={classMap[style]}
+          title={isRecord ? `${d}（录入日）` : d}
+        >
+          <span>{d.slice(5)}</span>
+          {dayLabel !== "" && <span className="font-semibold">{dayLabel}</span>}
+        </span>
+      );
+    };
+
+    const Divider = () => (
+      <span
+        className="self-stretch w-px min-h-6 border-l border-dashed border-border mx-1 shrink-0"
+        aria-hidden
+      />
+    );
+
+    return (
+      <div className="flex flex-wrap items-center gap-1 min-w-[140px]">
+        {before.length > 0 && (
+          <>
+            <div className="flex flex-wrap gap-1.5 items-baseline">
+              {before.map((d) =>
+                renderTag(d, `D${calcTradingDaysBetween(recordDate, d)}`, "before")
+              )}
+            </div>
+            {(record.length > 0 || after.length > 0) && <Divider />}
+          </>
+        )}
+        {record.length > 0 && (
+          <>
+            <div className="flex flex-wrap gap-1.5 items-baseline">
+              {record.map((d) => renderTag(d, "录入日", "record"))}
+            </div>
+            {after.length > 0 && <Divider />}
+          </>
+        )}
+        {after.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 items-baseline">
+            {after.map((d) =>
+              renderTag(d, `D+${calcTradingDaysBetween(recordDate, d)}`, "after")
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function Ma5Ma30Cell({ code }: { code: string }) {
     const s = ma5ma30Map[code];
     if (!s) {
@@ -577,9 +739,7 @@ export function StocksPage({ records }: StocksPageProps) {
     }
     if (s.loading) {
       return (
-        <span className="text-xs text-muted-foreground animate-pulse">
-          查询中…
-        </span>
+        <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>
       );
     }
     if (s.error) {
@@ -601,10 +761,7 @@ export function StocksPage({ records }: StocksPageProps) {
     if (!s.series || s.series.length === 0) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
-    const chartData = s.series.map((p) => ({
-      ...p,
-      label: p.date.slice(5),
-    }));
+    const chartData = s.series.map((p) => ({ ...p, label: p.date.slice(5) }));
     return (
       <div className="flex flex-col gap-0.5 min-w-[200px]">
         <div className="h-[56px] w-[200px]">
@@ -671,99 +828,6 @@ export function StocksPage({ records }: StocksPageProps) {
               当日均价≈30日线
             </Badge>
           )}
-        </div>
-      </div>
-    );
-  }
-
-  function LimitUpCell({ code, date }: { code: string; date: string }) {
-    const key = `${code}-${date}`;
-    const info = limitUpMap[key];
-
-    if (!info) {
-      return <span className="text-xs text-muted-foreground">加载中…</span>;
-    }
-    if (info.loading) {
-      return (
-        <span className="text-xs text-muted-foreground animate-pulse">
-          查询中…
-        </span>
-      );
-    }
-    if (info.error) {
-      return (
-        <div className="flex flex-col gap-0.5">
-          <span className="text-xs text-destructive font-medium">查询失败</span>
-          <span className="text-[10px] text-destructive/70 max-w-[160px] break-words leading-tight">
-            {info.error}
-          </span>
-          <button
-            onClick={() => fetchLimitUp(code, date)}
-            className="text-[10px] text-primary underline-offset-2 hover:underline text-left mt-0.5"
-          >
-            重试
-          </button>
-        </div>
-      );
-    }
-
-    if (!info.limitUpDate) {
-      return (
-        <Badge
-          variant="outline"
-          className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground border-dashed"
-        >
-          暂无涨停
-        </Badge>
-      );
-    }
-
-    const days = calcTradingDaysBetween(date, info.limitUpDate);
-    const highlightClass =
-      days != null && days <= 3
-        ? "bg-stock-up/15 text-stock-up border-stock-up/40"
-        : days != null && days <= 10
-          ? "bg-primary/15 text-primary border-primary/40"
-          : "bg-secondary/40 text-foreground border-border/70";
-
-    let positionPercent = 60;
-    if (days != null && days > 0) {
-      const clamped = Math.min(days, 20);
-      positionPercent = (clamped / 20) * 100;
-    }
-
-    return (
-      <div className="flex flex-col gap-1 min-w-[220px]">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <Badge
-            className={`text-[10px] px-1.5 py-0 h-5 font-semibold border ${highlightClass}`}
-          >
-            已涨停
-          </Badge>
-          {days != null && (
-            <span className="text-[11px] text-muted-foreground font-mono">
-              第 {days} 个交易日
-            </span>
-          )}
-        </div>
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono">
-            <span>{date}</span>
-            <span>{info.limitUpDate}</span>
-          </div>
-          <div className="relative h-7">
-            <div className="absolute left-0 right-0 top-1/2 h-px bg-border" />
-            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-muted-foreground" />
-            <div
-              className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-stock-up"
-              style={{ left: `${positionPercent}%` }}
-            />
-            {days != null && (
-              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-[10px] text-muted-foreground whitespace-nowrap">
-                ≈ {days} 个交易日
-              </div>
-            )}
-          </div>
         </div>
       </div>
     );
@@ -842,6 +906,30 @@ export function StocksPage({ records }: StocksPageProps) {
                 ))}
               </SelectContent>
             </Select>
+            <Select
+              value={sortKey}
+              onValueChange={(v) => {
+                setSortKey(v as SortKey);
+                setSortDir(
+                  v === "limitUpDays" || v === "maProximity" || v === "ma20Proximity" ? "asc" : "desc"
+                );
+              }}
+            >
+              <SelectTrigger className="w-36 bg-secondary text-foreground border-border text-sm">
+                <SelectValue placeholder="排序" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border text-foreground">
+                <SelectItem value="date" className="text-sm focus:bg-secondary focus:text-foreground">录入日</SelectItem>
+                <SelectItem value="code" className="text-sm focus:bg-secondary focus:text-foreground">代码</SelectItem>
+                <SelectItem value="name" className="text-sm focus:bg-secondary focus:text-foreground">名称</SelectItem>
+                <SelectItem value="amount" className="text-sm focus:bg-secondary focus:text-foreground">市值</SelectItem>
+                <SelectItem value="debt_ratio" className="text-sm focus:bg-secondary focus:text-foreground">负债率</SelectItem>
+                <SelectItem value="tradingDays" className="text-sm focus:bg-secondary focus:text-foreground">交易天数</SelectItem>
+                <SelectItem value="limitUpDays" className="text-sm focus:bg-secondary focus:text-foreground">涨停天数</SelectItem>
+                <SelectItem value="maProximity" className="text-sm focus:bg-secondary focus:text-foreground">5日/30日接近</SelectItem>
+                <SelectItem value="ma20Proximity" className="text-sm focus:bg-secondary focus:text-foreground">20日线接近</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={pageSize} onValueChange={(v) => setPageSize(v as "10" | "20" | "50" | "all")}>
               <SelectTrigger className="w-32 bg-secondary text-foreground border-border text-sm">
                 <SelectValue placeholder="显示数量" />
@@ -866,7 +954,7 @@ export function StocksPage({ records }: StocksPageProps) {
           <div className="overflow-x-auto rounded-md border border-border">
             <Table>
               <TableHeader>
-                <TableRow className="border-border hover:bg-transparent">
+                <TableRow className="border-border hover:bg-transparent sticky top-0 z-20 bg-card">
                   <TableHead className="text-muted-foreground w-8">#</TableHead>
                   <TableHead
                     className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
@@ -910,28 +998,32 @@ export function StocksPage({ records }: StocksPageProps) {
                   >
                     交易天数<SortIcon col="tradingDays" />
                   </TableHead>
-                  <TableHead
-                    className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("limitUpDays")}
-                  >
+                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[140px]">
                     涨停情况
-                    <SortIcon col="limitUpDays" />
                   </TableHead>
-                  <TableHead className="text-muted-foreground whitespace-nowrap">
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("maProximity")}
+                  >
                     5日/30日线
                     {latestMa5Ma30DataDate && (
                       <span className="ml-1 text-[10px] font-normal text-muted-foreground/70">
                         ({latestMa5Ma30DataDate})
                       </span>
                     )}
+                    <SortIcon col="maProximity" />
                   </TableHead>
-                  <TableHead className="text-muted-foreground whitespace-nowrap">
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("ma20Proximity")}
+                  >
                     20日均线
                     {latestMa20DataDate && (
                       <span className="ml-1 text-[10px] font-normal text-muted-foreground/70">
                         (数据日期&nbsp;{latestMa20DataDate})
                       </span>
                     )}
+                    <SortIcon col="ma20Proximity" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -939,7 +1031,7 @@ export function StocksPage({ records }: StocksPageProps) {
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={12}
+                      colSpan={11}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
@@ -959,11 +1051,25 @@ export function StocksPage({ records }: StocksPageProps) {
                         <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
                           {r.date}
                         </TableCell>
-                        <TableCell className="font-mono text-sm text-foreground whitespace-nowrap">
-                          {r.code}
+                        <TableCell className="font-mono text-sm whitespace-nowrap">
+                          <a
+                            href={eastmoneyQuoteUrl(r.code)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline font-medium"
+                          >
+                            {r.code}
+                          </a>
                         </TableCell>
-                        <TableCell className="font-medium text-foreground whitespace-nowrap">
-                          {r.name}
+                        <TableCell className="font-medium whitespace-nowrap">
+                          <a
+                            href={eastmoneyQuoteUrl(r.code)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline"
+                          >
+                            {r.name}
+                          </a>
                         </TableCell>
                         <TableCell className="align-middle min-w-[140px]">
                           <div className="flex flex-wrap gap-2 items-center">
@@ -1018,7 +1124,7 @@ export function StocksPage({ records }: StocksPageProps) {
                           )}
                         </TableCell>
                         <TableCell>
-                          <LimitUpCell code={r.code} date={r.date} />
+                          <LimitUpCell code={r.code} recordDate={r.date} />
                         </TableCell>
                         <TableCell>
                           <Ma5Ma30Cell code={r.code} />
