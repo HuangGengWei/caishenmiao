@@ -1,6 +1,8 @@
-// Tushare API 服务
-const TUSHARE_TOKEN = "5501c8c52fffbca1ee27e604ec0c91b5aad636393f3f9ef45f9fed7f";
-const TUSHARE_API_URL = "http://api.tushare.pro";
+// Tushare API 服务（token 和自定义网关地址从 .env 读取）
+const TUSHARE_TOKEN = process.env.TUSHARE_TOKEN ?? "";
+// 要求：必须通过自定义网关调用，而不是官方默认地址
+const TUSHARE_API_URL =
+  process.env.TUSHARE_HTTP_URL || "http://lianghua.nanyangqiankun.top";
 
 interface TushareResponse<T = any> {
   request_id: string;
@@ -20,6 +22,9 @@ async function callTushareAPI(
   params: Record<string, any> = {},
   fields: string[] = []
 ): Promise<any> {
+  if (!TUSHARE_TOKEN?.trim()) {
+    throw new Error("未配置 TUSHARE_TOKEN，请在 .env 中设置 TUSHARE_TOKEN");
+  }
   try {
     const response = await fetch(TUSHARE_API_URL, {
       method: "POST",
@@ -619,10 +624,10 @@ export async function getStockInfo(
 
     // 取第一条结果（ts_code 查询应该只返回一条）
     const stock = basicInfo[0];
-    
-    // 严格验证返回结果的 symbol 是否与查询代码完全匹配
-    if (stock.symbol !== cleanCode) {
-      console.error(`代码查询不匹配: 输入 ${cleanCode}, 返回 ${stock.symbol}, 股票名称: ${stock.name}`);
+    // 规范化比较：Tushare 的 symbol 可能无前导零（如 "1"），与 cleanCode "000001" 视为一致
+    const normalizedReturn = String(stock.symbol ?? "").replace(/[^\d]/g, "").padStart(6, "0");
+    if (normalizedReturn !== cleanCode) {
+      console.error(`代码查询不匹配: 输入 ${cleanCode}, 返回 symbol ${stock.symbol} -> ${normalizedReturn}, 股票名称: ${stock.name}`);
       return null;
     }
     let chg: number | null = null;
