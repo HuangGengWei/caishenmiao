@@ -2,6 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { SignalRecord } from "@/lib/types";
 
+function isDatabaseUnreachable(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: string; code?: string; message?: string };
+  if (e.code === "P1001") return true;
+  if (e.name === "PrismaClientInitializationError") return true;
+  const msg = String(e.message ?? "");
+  return /Can't reach database|ECONNREFUSED|P1001|数据库服务器/i.test(msg);
+}
+
 // GET: 获取所有信号记录（支持日期范围筛选）
 export async function GET(req: NextRequest) {
   try {
@@ -43,6 +52,7 @@ export async function GET(req: NextRequest) {
         code: r.code,
         name: r.name,
         sector: r.sector ? r.sector.split("、").filter(Boolean) : [],
+        concept: r.concept ? r.concept.split("、").filter(Boolean) : [],
         sector_pattern:
           (r.sectorPattern === "水下拉水上" || r.sectorPattern === "波动三角收窄"
             ? r.sectorPattern
@@ -58,27 +68,33 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(formatted);
   } catch (error: any) {
-    console.error("GET /api/signals error:", error);
-    console.error("错误详情:", {
-      message: error.message,
-      code: error.code,
-      meta: error.meta,
-      stack: error.stack,
-    });
-    
-    // 提供更详细的错误信息
+    if (isDatabaseUnreachable(error)) {
+      console.warn(
+        "GET /api/signals: 无法连接数据库（请启动 MySQL 并检查 .env 中 DATABASE_URL）"
+      );
+      return NextResponse.json(
+        {
+          error:
+            "无法连接到数据库服务器。请确认 MySQL 已启动（日志中的地址如 localhost:3306），并核对 .env 里的 DATABASE_URL。",
+        },
+        { status: 503 }
+      );
+    }
+
+    console.error("GET /api/signals error:", error?.message ?? error);
+
     let errorMessage = error.message || "获取数据失败";
-    
-    if (error.code === 'P1001') {
+
+    if (error.code === "P1001") {
       errorMessage = "无法连接到数据库，请检查数据库配置";
-    } else if (error.code === 'P2025') {
+    } else if (error.code === "P2025") {
       errorMessage = "记录不存在";
-    } else if (error.code === 'P2002') {
+    } else if (error.code === "P2002") {
       errorMessage = "数据唯一性冲突";
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: errorMessage,
         details: error.code,
         meta: error.meta,
@@ -137,6 +153,10 @@ export async function POST(req: NextRequest) {
       if (sectorStr.length > 255) {
         throw new Error(`sector 字符串过长 (${sectorStr.length} > 255)`);
       }
+      const conceptStr = Array.isArray(r.concept) ? r.concept.join("、") : "";
+      if (conceptStr.length > 255) {
+        throw new Error(`concept 字符串过长 (${conceptStr.length} > 255)`);
+      }
 
       // 验证 code 和 name 不为空
       if (!r.code || !r.name) {
@@ -148,6 +168,7 @@ export async function POST(req: NextRequest) {
         code: r.code.substring(0, 16), // 限制长度
         name: r.name.substring(0, 64), // 限制长度
         sector: sectorStr,
+        concept: conceptStr || null,
         sectorPattern: r.sector_pattern ? r.sector_pattern.substring(0, 32) : null,
         turnover: r.turnover != null ? Number(r.turnover) : null,
         chg: r.chg != null ? Number(r.chg) : null,
@@ -166,17 +187,23 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true, count: data.length });
   } catch (error: any) {
-    console.error("POST /api/signals error:", error);
-    console.error("错误详情:", {
-      message: error.message,
-      code: error.code,
-      meta: error.meta,
-      stack: error.stack,
-    });
-    
-    // 提供更详细的错误信息
+    if (isDatabaseUnreachable(error)) {
+      console.warn(
+        "POST /api/signals: 无法连接数据库（请启动 MySQL 并检查 DATABASE_URL）"
+      );
+      return NextResponse.json(
+        {
+          error:
+            "无法连接到数据库服务器，无法保存。请启动 MySQL 并核对 .env 中的 DATABASE_URL。",
+        },
+        { status: 503 }
+      );
+    }
+
+    console.error("POST /api/signals error:", error?.message ?? error);
+
     let errorMessage = error.message || "保存数据失败";
-    
+
     if (error.code === 'P2002') {
       errorMessage = "数据已存在（唯一约束冲突）";
     } else if (error.code === 'P2003') {

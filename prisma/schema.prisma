@@ -16,6 +16,7 @@ model SignalRecord {
   code          String   @db.VarChar(16)
   name          String   @db.VarChar(64)
   sector        String   @db.VarChar(255) // JSON 数组字符串，用「、」分隔
+  concept       String?  @db.VarChar(255) // 概念字符串，用「、」分隔
   sectorPattern String?  @db.VarChar(32)  // "水下拉水上" | "波动三角收窄"
   turnover      Float?
   chg           Float?
@@ -73,4 +74,19 @@ model DeliveryRecord {
   @@index([code])
   @@index([batchId])
   @@map("delivery_records")
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  sku         String?  @unique @db.VarChar(64)
+  name        String   @db.VarChar(255)
+  description String?  @db.Text
+  price       Decimal  @db.Decimal(12, 2)
+  stock       Int      @default(0)
+  imageUrl    String?  @map("image_url") @db.VarChar(512)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("products")
 }

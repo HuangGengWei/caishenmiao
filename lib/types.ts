@@ -3,6 +3,7 @@ export interface SignalRecord {
   code: string;
   name: string;
   sector: string[];
+  concept?: string[];
   sector_pattern: "水下拉水上" | "波动三角收窄" | null;
   turnover: number | null;
   chg: number | null; // %

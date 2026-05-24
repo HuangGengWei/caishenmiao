@@ -133,7 +133,8 @@ function mapHeaderToKey(header: string): string | null {
     name: "name",
     股票简称: "name",
     板块: "sector",
-    概念: "sector",
+    概念: "concept",
+    concept: "concept",
     sector: "sector",
     水下拉水上: "sector_pattern",
     波动三角收窄: "sector_pattern",
@@ -185,6 +186,15 @@ function normalizeRecord(
   } else if (Array.isArray(raw.sector)) {
     sector = raw.sector as string[];
   }
+  let concept: string[] = [];
+  if (typeof raw.concept === "string") {
+    concept = (raw.concept as string)
+      .split(/[,，、]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } else if (Array.isArray(raw.concept)) {
+    concept = raw.concept as string[];
+  }
 
   const sectorPattern = parseSectorPattern(raw.sector_pattern);
   const turnover =
@@ -204,6 +214,7 @@ function normalizeRecord(
     code,
     name,
     sector,
+    concept,
     sector_pattern: sectorPattern,
     turnover,
     chg,

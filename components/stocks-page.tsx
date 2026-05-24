@@ -29,9 +29,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { CandlestickChart } from "@/components/candlestick-chart";
-import type { SignalRecord, SectorScreenshot } from "@/lib/types";
-import { getSectorScreenshot } from "@/lib/store";
+import type { SignalRecord } from "@/lib/types";
 
 interface StocksPageProps {
   records: SignalRecord[];
@@ -43,76 +41,98 @@ type SortKey =
   | "name"
   | "amount"
   | "debt_ratio"
-  | "tradingDays"
-  | "limitUpDays"
+  | "peTTM"
+  | "holderNum"
+  | "daysSinceLimitUp"
   | "maProximity"
-  | "ma20Proximity";
-
-interface OhlcPoint {
-  date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-}
-
-interface Ma20Status {
-  ma20: number | null;
-  latestClose: number | null;
-  latestHigh: number | null;
-  latestTradeDate: string | null;
-  status: "above" | "touched" | "below" | null;
-  ohlc: OhlcPoint[];
-  loading: boolean;
-  error?: string;
-}
+  | "highProximity"
+  | "weeklyVolumePattern";
 
 interface DailyChartPoint {
   date: string;
   close: number;
   ma5: number | null;
   ma30: number | null;
+  vol5: number | null;  // 5日成交量均线
+  vol10: number | null; // 10日成交量均线
 }
 
 interface Ma5Ma30Status {
   series: DailyChartPoint[];
   near: boolean | null;
   typicalNearMa30: boolean | null; // 当日分时均价（O/H/L/C 均价）与 30 日线是否接近
+  volNear: boolean | null; // 5日成交量与10日成交量是否接近
   latestTradeDate: string | null;
+  lastCrossDate: string | null; // 上次 MA5 与 MA30 交叉的日期
   loading: boolean;
   error?: string;
 }
 
 interface LimitUpInfo {
-  limitUpDate: string | null;
-  limitUpDates?: string[]; // 录入日前后涨停日期列表
+  lastLimitUpDate: string | null;  // 上个涨停日
   loading: boolean;
   error?: string;
 }
 
-/** 东方财富个股页 URL：沪 sh、深 sz、京 bj */
-function eastmoneyQuoteUrl(code: string): string {
+interface WeeklyVolumePatternInfo {
+  hasPattern: boolean;
+  patternStrength: number;
+  description: string;
+  weekCount: number;
+  weeklyVolumes: number[];
+  weekMinus1Volume: number;  // 前1周（最近的完整周）
+  weekMinus2Volume: number;  // 前2周
+  weekMinus3Volume: number;  // 前3周
+  weekMinus4Volume: number;  // 前4周（最早的完整周）
+  loading: boolean;
+  error?: string;
+}
+
+interface HighPointInfo {
+  price: number;
+  date: string;
+  proximityPercent: number;
+  aboveOrBelow: "above" | "below" | "equal";
+}
+
+interface HighProximityInfo {
+  highPoints: HighPointInfo[];      // 多个前高点（按价格降序）
+  nearestHighIndex: number;         // 距离目标价最近的高点索引
+  latestClose: number | null;
+  latestTradeDate: string | null;
+  targetPrice: number | null;
+  loading: boolean;
+  error?: string;
+}
+
+/** 雪球个股页 URL：沪 SH、深/京 SZ */
+function xueqiuQuoteUrl(code: string): string {
   const c = String(code).replace(/\D/g, "").padStart(6, "0");
-  if (c.startsWith("6") || c.startsWith("5")) return `https://quote.eastmoney.com/sh${c}.html`;
-  if (c.startsWith("4") || c.startsWith("8")) return `https://quote.eastmoney.com/bj${c}.html`;
-  return `https://quote.eastmoney.com/sz${c}.html`;
+  const market = c.startsWith("6") || c.startsWith("5") ? "SH" : "SZ";
+  return `https://xueqiu.com/S/${market}${c}`;
 }
 
 export function StocksPage({ records }: StocksPageProps) {
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("all");
+  const [conceptFilter, setConceptFilter] = useState("all");
+  const [dateRangeFilter, setDateRangeFilter] = useState<"all" | "7" | "14" | "30" | "60">("14");
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [pageSize, setPageSize] = useState<"10" | "20" | "50" | "all">("10");
   const [pageIndex, setPageIndex] = useState(0);
 
-  // 交易日历：存储所有已知交易日（YYYY-MM-DD），用于计算交易天数
-  const [tradingDays, setTradingDays] = useState<string[]>([]);
+  // 搜索防抖：用户停止输入 500ms 后才触发搜索
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [search]);
 
-  // MA20 数据：key = code
-  const [ma20Map, setMa20Map] = useState<Record<string, Ma20Status>>({});
-  // 最新数据日期（用于表头展示，取任一成功返回的 latestTradeDate）
-  const [latestMa20DataDate, setLatestMa20DataDate] = useState<string | null>(null);
+  // 交易日历：存储所有已知交易日（YYYY-MM-DD），用于计算距上个涨停日天数
+  const [tradingDays, setTradingDays] = useState<string[]>([]);
 
   // 5日/30日均线及是否接近：key = code
   const [ma5ma30Map, setMa5ma30Map] = useState<Record<string, Ma5Ma30Status>>({});
@@ -155,158 +175,216 @@ export function StocksPage({ records }: StocksPageProps) {
     load();
   }, []);
 
-  // 计算某录入日期到今天（含今天）的交易天数
-  const calcTradingDays = useCallback(
-    (recordDate: string): number | null => {
-      if (tradingDays.length === 0) return null;
-      const today = new Date().toISOString().slice(0, 10);
-      return tradingDays.filter((d) => d >= recordDate && d <= today).length;
-    },
-    [tradingDays]
-  );
-
-  // 录入日到目标日期的相对交易天数：目标晚于录入日为正(D+N)，早于录入日为负(D-N)，当日为 0
-  const calcTradingDaysBetween = useCallback(
-    (recordDate: string, targetDate: string): number | null => {
-      if (tradingDays.length === 0) return null;
-      if (targetDate === recordDate) return 0;
-      if (targetDate > recordDate) {
-        return tradingDays.filter((d) => d >= recordDate && d <= targetDate).length;
-      }
-      // 目标在录入日前：中间交易日个数取负，即 D-N
-      const n = tradingDays.filter((d) => d > targetDate && d <= recordDate).length;
-      return -n;
-    },
-    [tradingDays]
-  );
-
-  // 涨停信息
+  // 涨停信息（用于计算距上个涨停日天数）：key = code
   const [limitUpMap, setLimitUpMap] = useState<Record<string, LimitUpInfo>>({});
-  // 板块分时截图缓存 & 预览（使用右下角浮层展示）
-  const sectorShotCache = useRef<Map<string, SectorScreenshot | null>>(new Map());
-  const [hoverPreview, setHoverPreview] = useState<{ url: string; title: string } | null>(null);
 
-  const fetchMa20 = useCallback(async (code: string) => {
-    setMa20Map((prev) => ({
-      ...prev,
-      [code]: {
-        ma20: null,
-        latestClose: null,
-        latestHigh: null,
-        latestTradeDate: null,
-        status: null,
-        ohlc: [],
-        loading: true,
-      },
-    }));
-    try {
-      const res = await fetch(`/api/tushare/ma20-chart?code=${code}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setMa20Map((prev) => ({
-          ...prev,
-          [code]: {
-            ma20: null,
-            latestClose: null,
-            latestHigh: null,
-            latestTradeDate: null,
-            status: null,
-            ohlc: [],
-            loading: false,
-            error: data.error || "获取失败",
-          },
-        }));
-        return;
-      }
-      setMa20Map((prev) => ({
-        ...prev,
-        [code]: {
-          ma20: data.ma20,
-          latestClose: data.latestClose,
-          latestHigh: data.latestHigh,
-          latestTradeDate: data.latestTradeDate ?? null,
-          status: data.status,
-          ohlc: data.ohlc ?? [],
-          loading: false,
-        },
-      }));
-      if (data.latestTradeDate) {
-        setLatestMa20DataDate((d) =>
-          !d || data.latestTradeDate > d ? data.latestTradeDate : d
-        );
-      }
-    } catch (e: any) {
-      setMa20Map((prev) => ({
-        ...prev,
-        [code]: {
-          ma20: null,
-          latestClose: null,
-          latestHigh: null,
-          latestTradeDate: null,
-          status: null,
-          ohlc: [],
-          loading: false,
-          error: e?.message || "网络请求失败",
-        },
-      }));
-    }
-  }, []);
+  // 股票信息（含 PE(TTM)、股东人数）：key = code
+  const [stockInfoMap, setStockInfoMap] = useState<Record<string, { peTTM: number | null; holderNum: number | null; loading: boolean; error?: string }>>({});
+
+  // 前高点接近度信息：key = code
+  const [highProximityMap, setHighProximityMap] = useState<Record<string, HighProximityInfo>>({});
+  const [latestHighProximityDataDate, setLatestHighProximityDataDate] = useState<string | null>(null);
+
+  // 周线放量形态：key = code
+  const [weeklyVolumePatternMap, setWeeklyVolumePatternMap] = useState<Record<string, WeeklyVolumePatternInfo>>({});
 
   const fetchDailyChart = useCallback(async (code: string) => {
-    setMa5ma30Map((prev) => ({
-      ...prev,
-      [code]: {
-        series: [],
-        latestTradeDate: null,
-        near: null,
-        typicalNearMa30: null,
-        loading: true,
-      },
-    }));
+    // 先设置 loading 状态，保留已有数据
+    setMa5ma30Map((prev) => {
+      const p = prev[code];
+      // 如果已经在 loading，不重复设置
+      if (p?.loading) return prev;
+      return {
+        ...prev,
+        [code]: {
+          series: p?.series ?? [],
+          latestTradeDate: p?.latestTradeDate ?? null,
+          near: p?.near ?? null,
+          typicalNearMa30: p?.typicalNearMa30 ?? null,
+          volNear: p?.volNear ?? null,
+          lastCrossDate: p?.lastCrossDate ?? null,
+          loading: true,
+          error: undefined,
+        },
+      };
+    });
     try {
       const res = await fetch(`/api/tushare/daily-chart?code=${code}`);
       const data = await res.json();
       if (!res.ok) {
-        setMa5ma30Map((prev) => ({
-          ...prev,
-          [code]: {
-            series: [],
-            latestTradeDate: null,
-            near: null,
-            typicalNearMa30: null,
-            loading: false,
-            error: data.error || "获取失败",
-          },
-        }));
+        setMa5ma30Map((prev) => {
+          const p = prev[code];
+          return {
+            ...prev,
+            [code]: {
+              series: p?.series ?? [],
+              latestTradeDate: p?.latestTradeDate ?? null,
+              near: p?.near ?? null,
+              typicalNearMa30: p?.typicalNearMa30 ?? null,
+              volNear: p?.volNear ?? null,
+              lastCrossDate: p?.lastCrossDate ?? null,
+              loading: false,
+              error: data.error || "获取失败",
+            },
+          };
+        });
         return;
       }
       const latestDate =
         data.series?.length > 0
           ? data.series[data.series.length - 1].date
           : null;
-      setMa5ma30Map((prev) => ({
-        ...prev,
-        [code]: {
+      // 只在数据真正变化时才更新
+      setMa5ma30Map((prev) => {
+        const p = prev[code];
+        const newData = {
           series: data.series ?? [],
           near: data.near ?? false,
           typicalNearMa30: data.typicalNearMa30 ?? false,
+          volNear: data.volNear ?? false,
           latestTradeDate: latestDate,
+          lastCrossDate: data.lastCrossDate ?? null,
           loading: false,
-        },
-      }));
+        };
+        // 比较新旧数据，如果相同则不更新
+        if (
+          p &&
+          !p.loading &&
+          p.series?.length === newData.series.length &&
+          p.near === newData.near &&
+          p.typicalNearMa30 === newData.typicalNearMa30 &&
+          p.volNear === newData.volNear &&
+          p.lastCrossDate === newData.lastCrossDate
+        ) {
+          // 数据相同，不触发重绘
+          return prev;
+        }
+        return {
+          ...prev,
+          [code]: newData,
+        };
+      });
       if (latestDate) {
         setLatestMa5Ma30DataDate((d) =>
           !d || latestDate > d ? latestDate : d
         );
       }
     } catch (e: any) {
-      setMa5ma30Map((prev) => ({
+      setMa5ma30Map((prev) => {
+        const p = prev[code];
+        return {
+          ...prev,
+          [code]: {
+            series: p?.series ?? [],
+            latestTradeDate: p?.latestTradeDate ?? null,
+            near: p?.near ?? null,
+            typicalNearMa30: p?.typicalNearMa30 ?? null,
+            volNear: p?.volNear ?? null,
+            lastCrossDate: p?.lastCrossDate ?? null,
+            loading: false,
+            error: e?.message || "网络请求失败",
+          },
+        };
+      });
+    }
+  }, []);
+
+  const fetchLimitUp = useCallback(
+    async (code: string) => {
+      setLimitUpMap((prev) => {
+        const p = prev[code];
+        return {
+          ...prev,
+          [code]: {
+            lastLimitUpDate: p?.lastLimitUpDate ?? null,
+            loading: true,
+            error: undefined,
+          },
+        };
+      });
+      try {
+        const res = await fetch(`/api/tushare/limit-up?code=${code}`);
+        const data = await res.json();
+        if (!res.ok) {
+          setLimitUpMap((prev) => {
+            const p = prev[code];
+            return {
+              ...prev,
+              [code]: {
+                lastLimitUpDate: p?.lastLimitUpDate ?? null,
+                loading: false,
+                error: data.error || "获取失败",
+              },
+            };
+          });
+          return;
+        }
+        setLimitUpMap((prev) => ({
+          ...prev,
+          [code]: {
+            lastLimitUpDate: data.lastLimitUpDate ?? null,
+            loading: false,
+          },
+        }));
+      } catch (e: any) {
+        setLimitUpMap((prev) => {
+          const p = prev[code];
+          return {
+            ...prev,
+            [code]: {
+              lastLimitUpDate: p?.lastLimitUpDate ?? null,
+              loading: false,
+              error: e?.message || "网络请求失败",
+            },
+          };
+        });
+      }
+    },
+    []
+  );
+
+  const fetchStockInfo = useCallback(async (code: string, tradeDate?: string) => {
+    setStockInfoMap((prev) => ({
+      ...prev,
+      [code]: {
+        peTTM: prev[code]?.peTTM ?? null,
+        holderNum: prev[code]?.holderNum ?? null,
+        loading: true,
+        error: undefined,
+      },
+    }));
+    try {
+      const url = tradeDate
+        ? `/api/tushare/stock-info?code=${code}&tradeDate=${tradeDate}`
+        : `/api/tushare/stock-info?code=${code}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) {
+        setStockInfoMap((prev) => ({
+          ...prev,
+          [code]: {
+            peTTM: prev[code]?.peTTM ?? null,
+            holderNum: prev[code]?.holderNum ?? null,
+            loading: false,
+            error: data.error || "获取失败",
+          },
+        }));
+        return;
+      }
+      setStockInfoMap((prev) => ({
         ...prev,
         [code]: {
-          series: [],
-          latestTradeDate: null,
-          near: null,
-          typicalNearMa30: null,
+          peTTM: data.peTTM ?? null,
+          holderNum: data.holderNum ?? null,
+          loading: false,
+        },
+      }));
+    } catch (e: any) {
+      setStockInfoMap((prev) => ({
+        ...prev,
+        [code]: {
+          peTTM: prev[code]?.peTTM ?? null,
+          holderNum: prev[code]?.holderNum ?? null,
           loading: false,
           error: e?.message || "网络请求失败",
         },
@@ -314,52 +392,142 @@ export function StocksPage({ records }: StocksPageProps) {
     }
   }, []);
 
-  const fetchLimitUp = useCallback(
-    async (code: string, recordDate: string) => {
-      const key = `${code}-${recordDate}`;
-      setLimitUpMap((prev) => ({
+  const fetchWeeklyVolumePattern = useCallback(async (code: string) => {
+    setWeeklyVolumePatternMap((prev) => ({
+      ...prev,
+      [code]: {
+        hasPattern: false,
+        patternStrength: 0,
+        description: "",
+        weekCount: 0,
+        weeklyVolumes: [],
+        weekMinus1Volume: 0,
+        weekMinus2Volume: 0,
+        weekMinus3Volume: 0,
+        weekMinus4Volume: 0,
+        loading: true,
+        error: undefined,
+      },
+    }));
+    try {
+      const res = await fetch(`/api/tushare/weekly-volume?code=${code}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setWeeklyVolumePatternMap((prev) => ({
+          ...prev,
+          [code]: {
+            hasPattern: false,
+            patternStrength: 0,
+            description: "",
+            weekCount: 0,
+            weeklyVolumes: [],
+            weekMinus1Volume: 0,
+            weekMinus2Volume: 0,
+            weekMinus3Volume: 0,
+            weekMinus4Volume: 0,
+            loading: false,
+            error: data.error || "获取失败",
+          },
+        }));
+        return;
+      }
+      setWeeklyVolumePatternMap((prev) => ({
         ...prev,
-        [key]: {
-          limitUpDate: null,
-          loading: true,
+        [code]: {
+          hasPattern: data.hasPattern ?? false,
+          patternStrength: data.patternStrength ?? 0,
+          description: data.description ?? "",
+          weekCount: data.weekCount ?? 0,
+          weeklyVolumes: data.weeklyVolumes ?? [],
+          weekMinus1Volume: data.weekMinus1Volume ?? 0,
+          weekMinus2Volume: data.weekMinus2Volume ?? 0,
+          weekMinus3Volume: data.weekMinus3Volume ?? 0,
+          weekMinus4Volume: data.weekMinus4Volume ?? 0,
+          loading: false,
         },
       }));
-      try {
-        const params = new URLSearchParams({ code, recordDate, extended: "1" });
-        const res = await fetch(`/api/tushare/limit-up?${params.toString()}`);
-        const data = await res.json();
-        if (!res.ok) {
-          setLimitUpMap((prev) => ({
-            ...prev,
-            [key]: {
-              limitUpDate: null,
-              loading: false,
-              error: data.error || "获取失败",
-            },
-          }));
-          return;
-        }
-        setLimitUpMap((prev) => ({
+    } catch (e: any) {
+      setWeeklyVolumePatternMap((prev) => ({
+        ...prev,
+        [code]: {
+          hasPattern: false,
+          patternStrength: 0,
+          description: "",
+          weekCount: 0,
+          weeklyVolumes: [],
+          weekMinus1Volume: 0,
+          weekMinus2Volume: 0,
+          weekMinus3Volume: 0,
+          weekMinus4Volume: 0,
+          loading: false,
+          error: e?.message || "网络请求失败",
+        },
+      }));
+    }
+  }, []);
+
+  const fetchHighProximity = useCallback(async (code: string) => {
+    setHighProximityMap((prev) => ({
+      ...prev,
+      [code]: {
+        highPoints: prev[code]?.highPoints ?? [],
+        nearestHighIndex: prev[code]?.nearestHighIndex ?? -1,
+        latestClose: prev[code]?.latestClose ?? null,
+        latestTradeDate: prev[code]?.latestTradeDate ?? null,
+        targetPrice: prev[code]?.targetPrice ?? null,
+        loading: true,
+        error: undefined,
+      },
+    }));
+    try {
+      const res = await fetch(`/api/tushare/high-proximity?code=${code}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setHighProximityMap((prev) => ({
           ...prev,
-          [key]: {
-            limitUpDate: data.limitUpDate ?? null,
-            limitUpDates: data.limitUpDates ?? [],
+          [code]: {
+            highPoints: prev[code]?.highPoints ?? [],
+            nearestHighIndex: prev[code]?.nearestHighIndex ?? -1,
+            latestClose: prev[code]?.latestClose ?? null,
+            latestTradeDate: prev[code]?.latestTradeDate ?? null,
+            targetPrice: prev[code]?.targetPrice ?? null,
             loading: false,
+            error: data.error || "获取失败",
           },
         }));
-      } catch (e: any) {
-        setLimitUpMap((prev) => ({
-          ...prev,
-          [key]: {
-            limitUpDate: null,
-            loading: false,
-            error: e?.message || "网络请求失败",
-          },
-        }));
+        return;
       }
-    },
-    []
-  );
+      setHighProximityMap((prev) => ({
+        ...prev,
+        [code]: {
+          highPoints: data.highPoints ?? [],
+          nearestHighIndex: data.nearestHighIndex ?? -1,
+          latestClose: data.latestClose,
+          latestTradeDate: data.latestTradeDate,
+          targetPrice: data.targetPrice,
+          loading: false,
+        },
+      }));
+      if (data.latestTradeDate) {
+        setLatestHighProximityDataDate((d) =>
+          !d || data.latestTradeDate > d ? data.latestTradeDate : d
+        );
+      }
+    } catch (e: any) {
+      setHighProximityMap((prev) => ({
+        ...prev,
+        [code]: {
+          highPoints: prev[code]?.highPoints ?? [],
+          nearestHighIndex: prev[code]?.nearestHighIndex ?? -1,
+          latestClose: prev[code]?.latestClose ?? null,
+          latestTradeDate: prev[code]?.latestTradeDate ?? null,
+          targetPrice: prev[code]?.targetPrice ?? null,
+          loading: false,
+          error: e?.message || "网络请求失败",
+        },
+      }));
+    }
+  }, []);
 
   const allSectors = useMemo(() => {
     const set = new Set<string>();
@@ -369,21 +537,54 @@ export function StocksPage({ records }: StocksPageProps) {
     return Array.from(set).sort();
   }, [records]);
 
-  const filtered = useMemo(() => {
-    let list = [...records];
+  const allConcepts = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of records) {
+      for (const c of r.concept ?? []) set.add(c);
+    }
+    return Array.from(set).sort();
+  }, [records]);
 
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
+  // 按股票代码去重：同一只股票保留最新录入日的一条记录
+  const dedupedRecords = useMemo(() => {
+    const latest = new Map<string, SignalRecord>();
+    for (const r of records) {
+      const existing = latest.get(r.code);
+      if (!existing || r.date > existing.date) {
+        latest.set(r.code, r);
+      }
+    }
+    return Array.from(latest.values());
+  }, [records]);
+
+  const filtered = useMemo(() => {
+    let list = [...dedupedRecords];
+
+    // 时间范围筛选：只显示最近 N 天内录入的股票
+    if (dateRangeFilter !== "all") {
+      const days = parseInt(dateRangeFilter, 10);
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - days);
+      const cutoffStr = cutoffDate.toISOString().slice(0, 10);
+      list = list.filter((r) => r.date >= cutoffStr);
+    }
+
+    if (debouncedSearch.trim()) {
+      const q = debouncedSearch.trim().toLowerCase();
       list = list.filter(
         (r) =>
           r.code.includes(q) ||
           r.name.toLowerCase().includes(q) ||
-          r.sector.some((s) => s.toLowerCase().includes(q))
+          r.sector.some((s) => s.toLowerCase().includes(q)) ||
+          (r.concept ?? []).some((c) => c.toLowerCase().includes(q))
       );
     }
 
     if (sectorFilter !== "all") {
       list = list.filter((r) => r.sector.includes(sectorFilter));
+    }
+    if (conceptFilter !== "all") {
+      list = list.filter((r) => (r.concept ?? []).includes(conceptFilter));
     }
 
     list.sort((a, b) => {
@@ -410,18 +611,35 @@ export function StocksPage({ records }: StocksPageProps) {
           av = a.debt_ratio;
           bv = b.debt_ratio;
           break;
-        case "tradingDays": {
-          const ta = calcTradingDays(a.date);
-          const tb = calcTradingDays(b.date);
-          av = ta;
-          bv = tb;
+        case "peTTM": {
+          const getPE = (r: SignalRecord): number | null => {
+            const s = stockInfoMap[r.code];
+            if (!s || s.peTTM == null) return null;
+            return s.peTTM;
+          };
+          av = getPE(a);
+          bv = getPE(b);
           break;
         }
-        case "limitUpDays": {
+        case "holderNum": {
+          const getHolderNum = (r: SignalRecord): number | null => {
+            const s = stockInfoMap[r.code];
+            if (!s || s.holderNum == null) return null;
+            return s.holderNum;
+          };
+          av = getHolderNum(a);
+          bv = getHolderNum(b);
+          break;
+        }
+        case "daysSinceLimitUp": {
           const getDays = (r: SignalRecord): number | null => {
-            const info = limitUpMap[`${r.code}-${r.date}`];
-            if (!info || info.loading || !info.limitUpDate) return null;
-            return calcTradingDaysBetween(r.date, info.limitUpDate);
+            const info = limitUpMap[r.code];
+            if (!info || info.loading || !info.lastLimitUpDate) return null;
+            // 计算距上个涨停日的交易日天数
+            const today = new Date().toISOString().slice(0, 10);
+            const lastLimitUp = info.lastLimitUpDate;
+            if (tradingDays.length === 0) return null;
+            return tradingDays.filter((d) => d > lastLimitUp && d <= today).length;
           };
           av = getDays(a);
           bv = getDays(b);
@@ -447,14 +665,31 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = getProximity(b);
           break;
         }
-        case "ma20Proximity": {
+        case "highProximity": {
           const getProximity = (r: SignalRecord): number | null => {
-            const s = ma20Map[r.code];
-            if (!s || s.ma20 == null || s.latestClose == null || s.ma20 <= 0) return null;
-            return Math.abs(s.latestClose - s.ma20) / s.ma20;
+            const s = highProximityMap[r.code];
+            if (!s || !s.highPoints || s.highPoints.length === 0) return null;
+            // 使用最近的前高点距离
+            const nearest = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
+            return nearest.proximityPercent;
           };
           av = getProximity(a);
           bv = getProximity(b);
+          break;
+        }
+        case "weeklyVolumePattern": {
+          // 按形态强度排序，强度越高排越前
+          const getPatternStrength = (r: SignalRecord): number => {
+            const s = weeklyVolumePatternMap[r.code];
+            if (!s || s.loading || s.error) return -1;
+            return s.hasPattern ? s.patternStrength : -1;
+          };
+          av = getPatternStrength(a);
+          bv = getPatternStrength(b);
+          // 降序排序：强度高的排前面
+          if (sortDir === "asc") {
+            [av, bv] = [bv, av];
+          }
           break;
         }
       }
@@ -468,16 +703,18 @@ export function StocksPage({ records }: StocksPageProps) {
 
     return list;
   }, [
-    records,
-    search,
+    dedupedRecords,
+    debouncedSearch,
     sectorFilter,
+    conceptFilter,
+    dateRangeFilter,
     sortKey,
     sortDir,
-    calcTradingDays,
-    calcTradingDaysBetween,
     limitUpMap,
+    stockInfoMap,
+    tradingDays,
     ma5ma30Map,
-    ma20Map,
+    highProximityMap,
   ]);
 
   const visibleRecords = useMemo(() => {
@@ -494,7 +731,7 @@ export function StocksPage({ records }: StocksPageProps) {
   // 当过滤条件或页大小变化时，重置或校正页码
   useEffect(() => {
     setPageIndex(0);
-  }, [search, sectorFilter, sortKey, sortDir, pageSize]);
+  }, [debouncedSearch, sectorFilter, conceptFilter, dateRangeFilter, sortKey, sortDir, pageSize]);
 
   useEffect(() => {
     if (pageSize === "all") return;
@@ -504,34 +741,171 @@ export function StocksPage({ records }: StocksPageProps) {
   }, [filtered.length, pageSize]);
 
   // 自动查询：
-  // - 对当前展示记录触发 MA20 / MA5-MA30
+  // - 对当前展示记录触发 MA5-MA30
   // - 当排序依据是“涨停天数”或“MA 接近程度”时，对过滤后的全集触发对应查询，保证排序基于全集数据
-  const fetchedRef = useRef<Set<string>>(new Set());
+  // ========== 请求队列：失败时暂停重试 ==========
+  // Tushare API 限制：一分钟500次 = 约8次/秒，正常请求不会超限
+  // 添加请求间隔确保不会触发限流
+  const requestQueueRef = useRef<{
+    queue: Array<() => Promise<void>>;
+    processing: boolean;
+    paused: boolean;
+    pauseUntil: number;
+  }>({
+    queue: [],
+    processing: false,
+    paused: false,
+    pauseUntil: 0,
+  });
+
+  // 进度追踪
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [queueCompleted, setQueueCompleted] = useState(0);
+  const [queuePaused, setQueuePaused] = useState(false);
+
+  const REQUEST_INTERVAL = 250; // 每个请求间隔250ms（确保不超过500次/分钟）
+  const PAUSE_DURATION = 10000; // 失败时暂停10秒
+  const MAX_RETRIES = 5; // 最大重试次数
+  const RETRY_DELAYS = [5000, 10000, 20000, 30000, 60000]; // 重试延迟：5s, 10s, 20s, 30s, 60s
+
+  const processQueue = useCallback(async () => {
+    if (requestQueueRef.current.processing) return;
+    requestQueueRef.current.processing = true;
+
+    while (requestQueueRef.current.queue.length > 0) {
+      // 检查是否需要暂停
+      const now = Date.now();
+      if (requestQueueRef.current.paused && now < requestQueueRef.current.pauseUntil) {
+        const waitTime = requestQueueRef.current.pauseUntil - now;
+        console.log(`API 限流，暂停 ${waitTime}ms...`);
+        setQueuePaused(true);
+        await new Promise((r) => setTimeout(r, waitTime));
+        requestQueueRef.current.paused = false;
+        setQueuePaused(false);
+      }
+
+      const task = requestQueueRef.current.queue.shift();
+      if (task) {
+        try {
+          await task();
+          setQueueCompleted((c) => c + 1);
+        } catch (e) {
+          console.error("队列任务执行失败:", e);
+        }
+        // 每个请求后等待间隔
+        await new Promise((r) => setTimeout(r, REQUEST_INTERVAL));
+      }
+    }
+
+    requestQueueRef.current.processing = false;
+  }, []);
+
+  const enqueueRequest = useCallback(
+    (fn: () => Promise<void>, retries = 0): void => {
+      setQueueTotal((t) => t + 1);
+      const wrappedTask = async () => {
+        try {
+          await fn();
+        } catch (e: any) {
+          // 检测是否是频率限制错误
+          const isRateLimited =
+            e?.message?.includes("过快") ||
+            e?.message?.includes("频率") ||
+            e?.message?.includes("limit") ||
+            e?.message?.includes("rate");
+
+          if (isRateLimited) {
+            // 触发全局暂停
+            requestQueueRef.current.paused = true;
+            requestQueueRef.current.pauseUntil = Date.now() + PAUSE_DURATION;
+            console.log(`API 频率限制，全局暂停 ${PAUSE_DURATION}ms`);
+            setQueuePaused(true);
+          }
+
+          if (retries < MAX_RETRIES) {
+            const delay = RETRY_DELAYS[retries];
+            console.log(`请求失败，${delay}ms后重试 (${retries + 1}/${MAX_RETRIES})`);
+            await new Promise((r) => setTimeout(r, delay));
+            requestQueueRef.current.queue.push(() => fn());
+            void processQueue();
+          } else {
+            console.error("请求最终失败:", e?.message);
+            setQueueCompleted((c) => c + 1); // 失败也计入完成
+          }
+        }
+      };
+      requestQueueRef.current.queue.push(wrappedTask);
+      void processQueue();
+    },
+    [processQueue]
+  );
+
   const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
   const fetchedLimitUpRef = useRef<Set<string>>(new Set());
+  const fetchedHighProximityRef = useRef<Set<string>>(new Set());
+  const fetchedWeeklyVolumeRef = useRef<Set<string>>(new Set());
+
+  // 当筛选条件变化时，清除已获取缓存，避免重复获取不在当前筛选结果中的股票
   useEffect(() => {
-    const baseForMa =
-      sortKey === "maProximity" || sortKey === "ma20Proximity" ? filtered : visibleRecords;
-    const codes = Array.from(new Set(baseForMa.map((r) => r.code)));
-    for (const code of codes) {
-      if (!fetchedRef.current.has(code)) {
-        fetchedRef.current.add(code);
-        fetchMa20(code);
-      }
+    fetchedMa5Ma30Ref.current.clear();
+    fetchedLimitUpRef.current.clear();
+    fetchedHighProximityRef.current.clear();
+    fetchedWeeklyVolumeRef.current.clear();
+  }, [debouncedSearch, sectorFilter, conceptFilter, dateRangeFilter]);
+
+  useEffect(() => {
+    // 5日线/30日线排序需要全量数据才能正确排序
+    const needFullData = sortKey === "maProximity";
+    const needFullWeekly = sortKey === "weeklyVolumePattern";
+    const baseCodes = needFullData || needFullWeekly
+      ? Array.from(new Set(filtered.map((r) => r.code)))
+      : Array.from(new Set(visibleRecords.map((r) => r.code)));
+
+    // MA5MA30: 排序时获取全量，否则只获取可见页（通过队列控制速率）
+    for (const code of baseCodes) {
       if (!fetchedMa5Ma30Ref.current.has(code)) {
         fetchedMa5Ma30Ref.current.add(code);
-        fetchDailyChart(code);
+        enqueueRequest(async () => { await fetchDailyChart(code); });
       }
     }
-    const baseForLimitUp = sortKey === "limitUpDays" ? filtered : visibleRecords;
-    for (const r of baseForLimitUp) {
-      const key = `${r.code}-${r.date}`;
-      if (!fetchedLimitUpRef.current.has(key)) {
-        fetchedLimitUpRef.current.add(key);
-        fetchLimitUp(r.code, r.date);
+
+    // 其他数据只获取当前可见页面（通过队列控制速率）
+    const visibleCodes = Array.from(new Set(visibleRecords.map((r) => r.code)));
+    for (const code of visibleCodes) {
+      if (!fetchedHighProximityRef.current.has(code)) {
+        fetchedHighProximityRef.current.add(code);
+        enqueueRequest(async () => { await fetchHighProximity(code); });
+      }
+      if (!fetchedLimitUpRef.current.has(code)) {
+        fetchedLimitUpRef.current.add(code);
+        enqueueRequest(async () => { await fetchLimitUp(code); });
       }
     }
-  }, [visibleRecords, filtered, sortKey, fetchMa20, fetchDailyChart, fetchLimitUp]);
+
+    // 周线放量：排序时获取全量，否则只获取可见页
+    const weeklyCodes = needFullWeekly
+      ? Array.from(new Set(filtered.map((r) => r.code)))
+      : visibleCodes;
+    for (const code of weeklyCodes) {
+      if (!fetchedWeeklyVolumeRef.current.has(code)) {
+        fetchedWeeklyVolumeRef.current.add(code);
+        enqueueRequest(async () => { await fetchWeeklyVolumePattern(code); });
+      }
+    }
+  }, [visibleRecords, filtered, sortKey, enqueueRequest]);
+
+  // 监听 highProximityMap 变化，获取到 latestTradeDate 后触发 fetchStockInfo
+  const fetchedStockInfoWithDateRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const code of Object.keys(highProximityMap)) {
+      const hp = highProximityMap[code];
+      if (hp?.latestTradeDate && !hp.loading && !hp.error && !fetchedStockInfoWithDateRef.current.has(code)) {
+        fetchedStockInfoWithDateRef.current.add(code);
+        // 接入全局队列，控制速率
+        enqueueRequest(async () => { await fetchStockInfo(code, hp.latestTradeDate); });
+      }
+    }
+  }, [highProximityMap, enqueueRequest]);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -540,7 +914,7 @@ export function StocksPage({ records }: StocksPageProps) {
       setSortKey(key);
       // 涨停天数 & MA 接近程度都是“数值越小越好”，默认升序；其它默认降序
       setSortDir(
-        key === "limitUpDays" || key === "maProximity" || key === "ma20Proximity"
+        key === "limitUpDays" || key === "maProximity" || key === "highProximity"
           ? "asc"
           : "desc"
       );
@@ -557,177 +931,120 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
-  function Ma20Cell({ code }: { code: string }) {
-    const s = ma20Map[code];
+  /** PE(TTM) 显示，含假设价格 PE 计算小功能 */
+  function PECell({ code }: { code: string }) {
+    const s = stockInfoMap[code];
     if (!s) {
       return <span className="text-xs text-muted-foreground">加载中…</span>;
     }
     if (s.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
+    }
+    if (s.error && s.peTTM == null) {
       return (
-        <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>
+        <span className="text-[10px] text-destructive" title={s.error}>
+          查询失败
+        </span>
       );
     }
-    if (s.error) {
-      return (
-        <div className="flex flex-col gap-0.5">
-          <span className="text-xs text-destructive font-medium">查询失败</span>
-          <span className="text-[10px] text-destructive/70 max-w-[140px] break-words leading-tight">
-            {s.error}
-          </span>
-          <button
-            onClick={() => fetchMa20(code)}
-            className="text-[10px] text-primary underline-offset-2 hover:underline text-left mt-0.5"
-          >
-            重试
-          </button>
-        </div>
-      );
-    }
-    if (s.ma20 === null && (!s.ohlc || s.ohlc.length === 0)) {
+    if (s.peTTM == null) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
-    const statusBadge =
-      s.status === "above" ? (
-        <Badge className="text-[10px] px-1.5 py-0 h-5 bg-stock-up/20 text-stock-up border border-stock-up/40 font-semibold">
-          已上穿
-        </Badge>
-      ) : s.status === "touched" ? (
-        <Badge className="text-[10px] px-1.5 py-0 h-5 bg-primary/20 text-primary border border-primary/40 font-semibold">
-          触及
-        </Badge>
-      ) : s.status === "below" ? (
-        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground">
-          未达到
-        </Badge>
-      ) : null;
-    const hasChart = s.ohlc && s.ohlc.length > 0;
+    // 获取最新收盘价用于 PE 计算小功能
+    const hpInfo = highProximityMap[code];
+    const latestClose = hpInfo?.latestClose;
+
     return (
-      <div className="flex flex-col gap-0.5 min-w-[200px]">
-        {hasChart ? (
-          <CandlestickChart
-            data={s.ohlc}
-            ma20={s.ma20}
-            width={200}
-            height={56}
-            className="shrink-0"
+      <div className="flex flex-col gap-0.5 min-w-[80px]" title="修改假设价格计算PE">
+        <span className="font-mono text-xs text-foreground font-semibold">
+          {s.peTTM.toFixed(1)}
+        </span>
+        {latestClose != null && latestClose > 0 && (
+          <input
+            type="number"
+            defaultValue={latestClose.toFixed(2)}
+            className="text-[10px] font-mono bg-secondary border border-border rounded px-1 py-0.5 w-full text-foreground"
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v > 0 && s.peTTM != null) {
+                const ratio = v / latestClose;
+                const newPE = s.peTTM * ratio;
+                e.target.title = `假设价格 ${v.toFixed(2)} → PE ${newPE.toFixed(1)}`;
+              } else {
+                e.target.title = "";
+              }
+            }}
           />
-        ) : (
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-xs text-foreground font-semibold">
-              {s.ma20 != null ? s.ma20.toFixed(2) : "-"}
-            </span>
-            {statusBadge}
-          </div>
-        )}
-        {hasChart && (
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {statusBadge}
-            {s.ma20 != null && (
-              <span className="text-[10px] text-muted-foreground font-mono">
-                MA20 {s.ma20.toFixed(2)}
-              </span>
-            )}
-          </div>
         )}
       </div>
     );
   }
 
-  /** 涨停情况：以录入日为中心，显示多个涨停日期及相对天数（正数=录入日后，负数=录入日前） */
-  function LimitUpCell({ code, recordDate }: { code: string; recordDate: string }) {
-    const key = `${code}-${recordDate}`;
-    const info = limitUpMap[key];
+  /** 股东人数 */
+  function HolderNumCell({ code }: { code: string }) {
+    const s = stockInfoMap[code];
+    if (!s) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
+    }
+    if (s.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
+    }
+    if (s.error && s.holderNum == null) {
+      return (
+        <span className="text-[10px] text-destructive" title={s.error}>
+          查询失败
+        </span>
+      );
+    }
+    if (s.holderNum == null) {
+      return <span className="text-xs text-muted-foreground">-</span>;
+    }
+    // 格式化股东人数：万为单位
+    const holderWan = s.holderNum / 10000;
+    return (
+      <span className="font-mono text-xs text-foreground">
+        {holderWan >= 1 ? holderWan.toFixed(2) + "万" : s.holderNum.toLocaleString()}
+      </span>
+    );
+  }
+
+  /** 距上个涨停日的交易日天数 */
+  function DaysSinceLimitUpCell({ code }: { code: string }) {
+    const info = limitUpMap[code];
     if (!info) {
       return <span className="text-xs text-muted-foreground">加载中…</span>;
     }
     if (info.loading) {
       return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
     }
-    if (info.error) {
+    if (info.error && !info.lastLimitUpDate) {
       return (
         <span className="text-[10px] text-destructive" title={info.error}>
           查询失败
         </span>
       );
     }
-    const dates = info.limitUpDates ?? [];
-    if (dates.length === 0) {
+    if (!info.lastLimitUpDate) {
       return <span className="text-xs text-muted-foreground">暂无涨停</span>;
     }
-    const before: string[] = [];
-    const record: string[] = [];
-    const after: string[] = [];
-    for (const d of dates) {
-      const days = calcTradingDaysBetween(recordDate, d);
-      if (days === null) continue;
-      if (days < 0) before.push(d);
-      else if (days === 0) record.push(d);
-      else after.push(d);
-    }
-    before.sort((a, b) => a.localeCompare(b));
-    record.sort((a, b) => a.localeCompare(b));
-    after.sort((a, b) => a.localeCompare(b));
-
-    const renderTag = (
-      d: string,
-      dayLabel: string,
-      style: "before" | "record" | "after"
-    ) => {
-      const isRecord = style === "record";
-      const classMap = {
-        before:
-          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border border-amber-500/60 bg-amber-500/15 text-amber-700 dark:text-amber-400",
-        record:
-          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border-2 border-primary bg-primary/20 text-primary font-semibold ring-1 ring-primary/30",
-        after:
-          "inline-flex flex-col items-start text-[10px] font-mono rounded px-1.5 py-0.5 border border-stock-up/50 bg-stock-up/15 text-stock-up",
-      };
-      return (
-        <span
-          key={d}
-          className={classMap[style]}
-          title={isRecord ? `${d}（录入日）` : d}
-        >
-          <span>{d.slice(5)}</span>
-          {dayLabel !== "" && <span className="font-semibold">{dayLabel}</span>}
-        </span>
-      );
-    };
-
-    const Divider = () => (
-      <span
-        className="self-stretch w-px min-h-6 border-l border-dashed border-border mx-1 shrink-0"
-        aria-hidden
-      />
-    );
-
+    const today = new Date().toISOString().slice(0, 10);
+    const days = tradingDays.length > 0
+      ? tradingDays.filter((d) => d > info.lastLimitUpDate! && d <= today).length
+      : null;
     return (
-      <div className="flex flex-wrap items-center gap-1 min-w-[140px]">
-        {before.length > 0 && (
-          <>
-            <div className="flex flex-wrap gap-1.5 items-baseline">
-              {before.map((d) =>
-                renderTag(d, `D${calcTradingDaysBetween(recordDate, d)}`, "before")
-              )}
-            </div>
-            {(record.length > 0 || after.length > 0) && <Divider />}
-          </>
-        )}
-        {record.length > 0 && (
-          <>
-            <div className="flex flex-wrap gap-1.5 items-baseline">
-              {record.map((d) => renderTag(d, "录入日", "record"))}
-            </div>
-            {after.length > 0 && <Divider />}
-          </>
-        )}
-        {after.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 items-baseline">
-            {after.map((d) =>
-              renderTag(d, `D+${calcTradingDaysBetween(recordDate, d)}`, "after")
-            )}
-          </div>
-        )}
+      <div className="flex flex-col gap-0.5">
+        <span className={
+          days != null && days <= 3
+            ? "font-mono text-xs text-stock-up font-bold"
+            : days != null && days <= 10
+              ? "font-mono text-xs text-primary font-semibold"
+              : "font-mono text-xs text-foreground"
+        }>
+          {days !== null ? `${days}日` : "-"}
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          {info.lastLimitUpDate}
+        </span>
       </div>
     );
   }
@@ -742,7 +1059,8 @@ export function StocksPage({ records }: StocksPageProps) {
         <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>
       );
     }
-    if (s.error) {
+    const dailyStale = !!s.error && s.series && s.series.length > 0;
+    if (s.error && !dailyStale) {
       return (
         <div className="flex flex-col gap-0.5">
           <span className="text-xs text-destructive font-medium">查询失败</span>
@@ -764,6 +1082,19 @@ export function StocksPage({ records }: StocksPageProps) {
     const chartData = s.series.map((p) => ({ ...p, label: p.date.slice(5) }));
     return (
       <div className="flex flex-col gap-0.5 min-w-[200px]">
+        {dailyStale && (
+          <div className="text-[10px] text-amber-700 dark:text-amber-400 max-w-[200px] leading-tight">
+            刷新失败，以下为上次数据：
+            <span className="block text-destructive/90 mt-0.5">{s.error}</span>
+            <button
+              type="button"
+              onClick={() => fetchDailyChart(code)}
+              className="text-primary underline-offset-2 hover:underline mt-0.5"
+            >
+              重试
+            </button>
+          </div>
+        )}
         <div className="h-[56px] w-[200px]">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 2, right: 2, bottom: 0, left: 0 }}>
@@ -828,44 +1159,190 @@ export function StocksPage({ records }: StocksPageProps) {
               当日均价≈30日线
             </Badge>
           )}
+          {s.volNear && (
+            <Badge className="text-[10px] px-1.5 py-0 h-5 w-fit bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-500/40 font-semibold">
+              5日/10日量接近
+            </Badge>
+          )}
+          {s.lastCrossDate && (
+            <span className="text-[10px] text-muted-foreground">
+              上次交叉: {s.lastCrossDate}
+              {tradingDays.length > 0 && (() => {
+                const today = new Date().toISOString().slice(0, 10);
+                const days = tradingDays.filter((d) => d > s.lastCrossDate! && d <= today).length;
+                return ` (${days}日前)`;
+              })()}
+            </span>
+          )}
         </div>
       </div>
     );
   }
 
-  async function handleSectorPatternHover(record: SignalRecord) {
-    if (!record.sector || record.sector.length === 0) {
-      setHoverPreview(null);
-      return;
+  function HighProximityCell({ code }: { code: string }) {
+    const s = highProximityMap[code];
+    if (!s) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
     }
-    const sectorName = record.sector[0];
-    const cacheKey = `${record.date}|${sectorName}`;
-    if (sectorShotCache.current.has(cacheKey)) {
-      const cached = sectorShotCache.current.get(cacheKey);
-      if (cached?.imageDataUrl) {
-        setHoverPreview({
-          url: cached.imageDataUrl,
-          title: `${record.date} ${sectorName}`,
-        });
-      } else {
-        setHoverPreview(null);
-      }
-      return;
+    if (s.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
     }
-    try {
-      const shot = await getSectorScreenshot(record.date, sectorName);
-      sectorShotCache.current.set(cacheKey, shot);
-      if (shot?.imageDataUrl) {
-        setHoverPreview({
-          url: shot.imageDataUrl,
-          title: `${record.date} ${sectorName}`,
-        });
-      } else {
-        setHoverPreview(null);
-      }
-    } catch {
-      setHoverPreview(null);
+    if (s.error && (!s.highPoints || s.highPoints.length === 0)) {
+      return (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs text-destructive font-medium">查询失败</span>
+          <span className="text-[10px] text-destructive/70 max-w-[120px] break-words leading-tight">
+            {s.error}
+          </span>
+          <button
+            onClick={() => fetchHighProximity(code)}
+            className="text-[10px] text-primary underline-offset-2 hover:underline text-left mt-0.5"
+          >
+            重试
+          </button>
+        </div>
+      );
     }
+    if (!s.highPoints || s.highPoints.length === 0) {
+      return <span className="text-xs text-muted-foreground">-</span>;
+    }
+
+    // 获取最近的前高点
+    const nearestHigh = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
+    const isNear = nearestHigh.proximityPercent <= 5;
+    const isVeryNear = nearestHigh.proximityPercent <= 2;
+
+    return (
+      <div className="flex flex-col gap-0.5 min-w-[120px]">
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-xs text-foreground font-semibold">
+            {nearestHigh.proximityPercent.toFixed(2)}%
+          </span>
+          {isVeryNear && (
+            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-stock-up/20 text-stock-up border border-stock-up/40 font-semibold">
+              极近
+            </Badge>
+          )}
+          {isNear && !isVeryNear && (
+            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-primary/20 text-primary border border-primary/40 font-semibold">
+              接近
+            </Badge>
+          )}
+        </div>
+        <div className="text-[10px] text-muted-foreground leading-tight">
+          {s.highPoints.map((hp, idx) => (
+            <div key={idx} className={idx === s.nearestHighIndex ? "text-foreground font-medium" : ""}>
+              第{idx + 1}高: {hp.price.toFixed(2)} ({hp.date}) {hp.proximityPercent.toFixed(1)}%
+            </div>
+          ))}
+          <div>目标: {s.targetPrice?.toFixed(2)} (收盘+10%)</div>
+          <div>最新: {s.latestClose?.toFixed(2)}</div>
+        </div>
+      </div>
+    );
+  }
+
+  function WeeklyVolumePatternCell({ code }: { code: string }) {
+    const s = weeklyVolumePatternMap[code];
+    if (!s) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
+    }
+    if (s.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
+    }
+    if (s.error) {
+      return (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs text-destructive font-medium">查询失败</span>
+          <button
+            onClick={() => fetchWeeklyVolumePattern(code)}
+            className="text-[10px] text-primary underline-offset-2 hover:underline text-left mt-0.5"
+          >
+            重试
+          </button>
+        </div>
+      );
+    }
+    // 统一使用 weeklyVolumes 或单独字段渲染柱状图
+    const volumes = (s.weeklyVolumes && s.weeklyVolumes.length === 4)
+      ? s.weeklyVolumes
+      : [s.weekMinus4Volume || 0, s.weekMinus3Volume || 0, s.weekMinus2Volume || 0, s.weekMinus1Volume || 0];
+    const hasVolumeData = volumes.some(v => v > 0);
+
+    if (!hasVolumeData) {
+      return <span className="text-xs text-muted-foreground">-</span>;
+    }
+
+    if (!s.hasPattern) {
+      const maxVol = Math.max(...volumes, 1);
+      return (
+        <div className="flex flex-col gap-0.5 min-w-[100px]">
+          <div className="flex gap-1">
+            {volumes.map((vol, i) => {
+              const height = (vol / maxVol) * 100;
+              const barColor = i === 0 || i === 3 ? "bg-primary/60" : "bg-muted-foreground/40";
+              return (
+                <div key={i} className="flex flex-col items-center gap-0.5">
+                  <div className="w-3 h-8 bg-secondary rounded-sm relative overflow-hidden">
+                    <div
+                      className={`absolute bottom-0 left-0 right-0 ${barColor} rounded-sm`}
+                      style={{ height: `${height}%` }}
+                    />
+                  </div>
+                  <span className="text-[8px] text-muted-foreground">W{4 - i}</span>
+                </div>
+              );
+            })}
+          </div>
+          {s.description && (
+            <div className="text-[9px] text-muted-foreground leading-tight">
+              {s.description}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // 有形态时显示
+    const strengthColor = s.patternStrength >= 80 
+      ? "bg-stock-up/20 text-stock-up border-stock-up/40"
+      : s.patternStrength >= 60
+      ? "bg-primary/20 text-primary border-primary/40"
+      : "bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/40";
+
+    const maxVol = Math.max(...volumes, 1);
+
+    return (
+      <div className="flex flex-col gap-0.5 min-w-[100px]">
+        <div className="flex items-center gap-1.5">
+          <Badge className={`text-[10px] px-1.5 py-0 h-5 w-fit ${strengthColor} font-semibold`}>
+            周线放量
+          </Badge>
+          <span className="text-[10px] text-muted-foreground">{s.patternStrength}%</span>
+        </div>
+        <div className="flex gap-1">
+          {volumes.map((vol, i) => {
+            const height = (vol / maxVol) * 100;
+            const barColor = i === 0 || i === 3 ? "bg-stock-up/70" : "bg-muted-foreground/30";
+            const label = i === 0 ? "左放" : i === 3 ? "右放" : "缩";
+            return (
+              <div key={i} className="flex flex-col items-center gap-0.5">
+                <div className="w-3 h-10 bg-secondary rounded-sm relative overflow-hidden">
+                  <div
+                    className={`absolute bottom-0 left-0 right-0 ${barColor} rounded-sm transition-all`}
+                    style={{ height: `${height}%` }}
+                  />
+                </div>
+                <span className="text-[7px] text-muted-foreground">{label}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="text-[9px] text-muted-foreground leading-tight">
+          {s.description}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -875,9 +1352,30 @@ export function StocksPage({ records }: StocksPageProps) {
           <CardTitle className="text-lg font-semibold text-foreground">
             个股列表
             <span className="text-sm font-normal text-muted-foreground ml-2">
-              显示 {visibleRecords.length} / {filtered.length} 条（总 {records.length} 条）
+              显示 {visibleRecords.length} / {filtered.length} 条（总 {dedupedRecords.length} 只）
             </span>
           </CardTitle>
+          {/* 数据加载进度条 */}
+          {queueTotal > 0 && queueCompleted < queueTotal && (
+            <div className="mt-2">
+              <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                <span>
+                  {queuePaused ? (
+                    <span className="text-orange-500 animate-pulse">API限流，暂停中...</span>
+                  ) : (
+                    "正在加载数据..."
+                  )}
+                </span>
+                <span>{queueCompleted} / {queueTotal}</span>
+              </div>
+              <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-200 ${queuePaused ? "bg-orange-500" : "bg-primary"}`}
+                  style={{ width: `${Math.min(100, (queueCompleted / queueTotal) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-center gap-3 mb-4">
@@ -906,12 +1404,53 @@ export function StocksPage({ records }: StocksPageProps) {
                 ))}
               </SelectContent>
             </Select>
+            <Select value={conceptFilter} onValueChange={setConceptFilter}>
+              <SelectTrigger className="w-40 bg-secondary text-foreground border-border text-sm">
+                <SelectValue placeholder="概念筛选" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border text-foreground">
+                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
+                  全部概念
+                </SelectItem>
+                {allConcepts.map((c) => (
+                  <SelectItem
+                    key={c}
+                    value={c}
+                    className="text-sm focus:bg-secondary focus:text-foreground"
+                  >
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={dateRangeFilter} onValueChange={(v) => setDateRangeFilter(v as "all" | "7" | "14" | "30" | "60")}>
+              <SelectTrigger className="w-32 bg-secondary text-foreground border-border text-sm">
+                <SelectValue placeholder="时间范围" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border text-foreground">
+                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
+                  全部
+                </SelectItem>
+                <SelectItem value="7" className="text-sm focus:bg-secondary focus:text-foreground">
+                  近7天
+                </SelectItem>
+                <SelectItem value="14" className="text-sm focus:bg-secondary focus:text-foreground">
+                  近14天
+                </SelectItem>
+                <SelectItem value="30" className="text-sm focus:bg-secondary focus:text-foreground">
+                  近30天
+                </SelectItem>
+                <SelectItem value="60" className="text-sm focus:bg-secondary focus:text-foreground">
+                  近60天
+                </SelectItem>
+              </SelectContent>
+            </Select>
             <Select
               value={sortKey}
               onValueChange={(v) => {
                 setSortKey(v as SortKey);
                 setSortDir(
-                  v === "limitUpDays" || v === "maProximity" || v === "ma20Proximity" ? "asc" : "desc"
+                  v === "peTTM" || v === "daysSinceLimitUp" || v === "maProximity" || v === "highProximity" ? "asc" : "desc"
                 );
               }}
             >
@@ -924,10 +1463,12 @@ export function StocksPage({ records }: StocksPageProps) {
                 <SelectItem value="name" className="text-sm focus:bg-secondary focus:text-foreground">名称</SelectItem>
                 <SelectItem value="amount" className="text-sm focus:bg-secondary focus:text-foreground">市值</SelectItem>
                 <SelectItem value="debt_ratio" className="text-sm focus:bg-secondary focus:text-foreground">负债率</SelectItem>
-                <SelectItem value="tradingDays" className="text-sm focus:bg-secondary focus:text-foreground">交易天数</SelectItem>
-                <SelectItem value="limitUpDays" className="text-sm focus:bg-secondary focus:text-foreground">涨停天数</SelectItem>
+                <SelectItem value="peTTM" className="text-sm focus:bg-secondary focus:text-foreground">PE(TTM)</SelectItem>
+                <SelectItem value="holderNum" className="text-sm focus:bg-secondary focus:text-foreground">股东人数</SelectItem>
+                <SelectItem value="daysSinceLimitUp" className="text-sm focus:bg-secondary focus:text-foreground">距涨停日</SelectItem>
                 <SelectItem value="maProximity" className="text-sm focus:bg-secondary focus:text-foreground">5日/30日接近</SelectItem>
-                <SelectItem value="ma20Proximity" className="text-sm focus:bg-secondary focus:text-foreground">20日线接近</SelectItem>
+                
+                <SelectItem value="highProximity" className="text-sm focus:bg-secondary focus:text-foreground">前高点接近</SelectItem>
               </SelectContent>
             </Select>
             <Select value={pageSize} onValueChange={(v) => setPageSize(v as "10" | "20" | "50" | "all")}>
@@ -977,29 +1518,29 @@ export function StocksPage({ records }: StocksPageProps) {
                   <TableHead className="text-muted-foreground whitespace-nowrap min-w-[140px]">
                     板块
                   </TableHead>
-                  <TableHead className="text-muted-foreground text-center whitespace-nowrap min-w-[100px]">
-                    板块分时
+                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[160px]">
+                    概念
                   </TableHead>
                   <TableHead
-                    className="text-muted-foreground text-right cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("amount")}
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("peTTM")}
                   >
-                    市值(亿)<SortIcon col="amount" />
+                    PE(TTM)
+                    <SortIcon col="peTTM" />
                   </TableHead>
                   <TableHead
-                    className="text-muted-foreground text-right cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("debt_ratio")}
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("holderNum")}
                   >
-                    负债率<SortIcon col="debt_ratio" />
+                    股东人数
+                    <SortIcon col="holderNum" />
                   </TableHead>
                   <TableHead
-                    className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground text-center"
-                    onClick={() => handleSort("tradingDays")}
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("daysSinceLimitUp")}
                   >
-                    交易天数<SortIcon col="tradingDays" />
-                  </TableHead>
-                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[140px]">
-                    涨停情况
+                    距涨停日
+                    <SortIcon col="daysSinceLimitUp" />
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
@@ -1013,17 +1554,25 @@ export function StocksPage({ records }: StocksPageProps) {
                     )}
                     <SortIcon col="maProximity" />
                   </TableHead>
+                  
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
-                    onClick={() => handleSort("ma20Proximity")}
+                    onClick={() => handleSort("highProximity")}
                   >
-                    20日均线
-                    {latestMa20DataDate && (
+                    前高点接近
+                    {latestHighProximityDataDate && (
                       <span className="ml-1 text-[10px] font-normal text-muted-foreground/70">
-                        (数据日期&nbsp;{latestMa20DataDate})
+                        (数据日期&nbsp;{latestHighProximityDataDate})
                       </span>
                     )}
-                    <SortIcon col="ma20Proximity" />
+                    <SortIcon col="highProximity" />
+                  </TableHead>
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("weeklyVolumePattern")}
+                  >
+                    周线放量
+                    <SortIcon col="weeklyVolumePattern" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -1031,7 +1580,7 @@ export function StocksPage({ records }: StocksPageProps) {
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={11}
+                      colSpan={14}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
@@ -1039,7 +1588,6 @@ export function StocksPage({ records }: StocksPageProps) {
                   </TableRow>
                 ) : (
                   visibleRecords.map((r, i) => {
-                    const days = calcTradingDays(r.date);
                     return (
                       <TableRow
                         key={`${r.code}-${r.date}-${i}`}
@@ -1053,7 +1601,7 @@ export function StocksPage({ records }: StocksPageProps) {
                         </TableCell>
                         <TableCell className="font-mono text-sm whitespace-nowrap">
                           <a
-                            href={eastmoneyQuoteUrl(r.code)}
+                            href={xueqiuQuoteUrl(r.code)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-primary hover:underline font-medium"
@@ -1063,13 +1611,20 @@ export function StocksPage({ records }: StocksPageProps) {
                         </TableCell>
                         <TableCell className="font-medium whitespace-nowrap">
                           <a
-                            href={eastmoneyQuoteUrl(r.code)}
+                            href={xueqiuQuoteUrl(r.code)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-primary hover:underline"
                           >
                             {r.name}
                           </a>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            {r.amount != null && (
+                              <span className="text-[10px] text-red-500 dark:text-red-400 font-mono">
+                                {r.amount}亿
+                              </span>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="align-middle min-w-[140px]">
                           <div className="flex flex-wrap gap-2 items-center">
@@ -1083,54 +1638,40 @@ export function StocksPage({ records }: StocksPageProps) {
                             ))}
                           </div>
                         </TableCell>
-                        <TableCell className="text-center align-middle min-w-[100px]">
-                          {r.sector_pattern ? (
-                            <span
-                              className={`inline-flex items-center rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap border ${
-                                r.sector_pattern === "水下拉水上"
-                                  ? "border-stock-up/50 text-stock-up bg-stock-up/10"
-                                  : "border-primary/50 text-primary bg-primary/10"
-                              }`}
-                              onMouseEnter={() => handleSectorPatternHover(r)}
-                              onMouseLeave={() => setHoverPreview(null)}
-                            >
-                              {r.sector_pattern}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground text-xs">-</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm whitespace-nowrap">
-                          {r.amount != null ? r.amount : "-"}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm whitespace-nowrap">
-                          {r.debt_ratio != null ? `${r.debt_ratio}%` : "-"}
-                        </TableCell>
-                        <TableCell className="text-center font-mono text-sm whitespace-nowrap">
-                          {days === null ? (
-                            <span className="text-muted-foreground">-</span>
-                          ) : (
-                            <span
-                              className={
-                                days <= 3
-                                  ? "text-stock-up font-bold"
-                                  : days <= 10
-                                    ? "text-primary font-semibold"
-                                    : "text-foreground"
-                              }
-                            >
-                              {days}
-                            </span>
-                          )}
+                        <TableCell className="align-middle min-w-[160px]">
+                          <div className="flex flex-wrap gap-2 items-center">
+                            {(r.concept ?? []).length > 0 ? (
+                              (r.concept ?? []).map((c) => (
+                                <span
+                                  key={c}
+                                  className="inline-flex items-center rounded-md bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/25 whitespace-nowrap"
+                                >
+                                  {c}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
-                          <LimitUpCell code={r.code} recordDate={r.date} />
+                          <PECell code={r.code} />
+                        </TableCell>
+                        <TableCell>
+                          <HolderNumCell code={r.code} />
+                        </TableCell>
+                        <TableCell>
+                          <DaysSinceLimitUpCell code={r.code} />
                         </TableCell>
                         <TableCell>
                           <Ma5Ma30Cell code={r.code} />
                         </TableCell>
+                        
                         <TableCell>
-                          <Ma20Cell code={r.code} />
+                          <HighProximityCell code={r.code} />
+                        </TableCell>
+                        <TableCell>
+                          <WeeklyVolumePatternCell code={r.code} />
                         </TableCell>
                       </TableRow>
                     );
@@ -1187,20 +1728,6 @@ export function StocksPage({ records }: StocksPageProps) {
           )}
         </CardContent>
       </Card>
-      {hoverPreview && (
-        <div className="fixed bottom-4 right-4 z-40 rounded-md border border-border bg-background/95 shadow-xl px-3 py-2 max-w-[420px] max-h-[260px]">
-          <div className="text-[11px] text-muted-foreground mb-1 truncate">
-            {hoverPreview.title}
-          </div>
-          <div className="max-h-[220px] overflow-hidden">
-            <img
-              src={hoverPreview.url}
-              alt={hoverPreview.title}
-              className="w-full h-auto object-contain"
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

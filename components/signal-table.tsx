@@ -46,9 +46,7 @@ export function SignalTable({
                 <TableHead className="text-muted-foreground">代码</TableHead>
                 <TableHead className="text-muted-foreground">名称</TableHead>
                 <TableHead className="text-muted-foreground">板块</TableHead>
-                <TableHead className="text-muted-foreground text-center">
-                  板块分时
-                </TableHead>
+                <TableHead className="text-muted-foreground">概念</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -78,21 +76,22 @@ export function SignalTable({
                       ))}
                     </div>
                   </TableCell>
-                  <TableCell className="text-center">
-                    {r.sector_pattern ? (
-                      <Badge
-                        variant="outline"
-                        className={`text-xs ${
-                          r.sector_pattern === "水下拉水上"
-                            ? "border-stock-up/50 text-stock-up"
-                            : "border-primary/50 text-primary"
-                        }`}
-                      >
-                        {r.sector_pattern}
-                      </Badge>
-                    ) : (
-                      <span className="text-muted-foreground text-xs">-</span>
-                    )}
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {(r.concept ?? []).length > 0 ? (
+                        (r.concept ?? []).map((c) => (
+                          <Badge
+                            key={c}
+                            variant="outline"
+                            className="text-xs border-amber-500/40 text-amber-700 dark:text-amber-400"
+                          >
+                            {c}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-muted-foreground text-xs">-</span>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

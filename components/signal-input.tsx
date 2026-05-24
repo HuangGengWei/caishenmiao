@@ -4,13 +4,6 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Table,
   TableBody,
   TableCell,
@@ -33,9 +26,8 @@ interface RowData {
   code: string;
   name: string;
   sector: string;
-  sector_pattern: string;
+  concept: string;
   turnover: string;
-  chg: string;
   amount: string;
   debt_ratio: string;
 }
@@ -46,9 +38,8 @@ function createEmptyRow(): RowData {
     code: "",
     name: "",
     sector: "",
-    sector_pattern: "",
+    concept: "",
     turnover: "",
-    chg: "",
     amount: "",
     debt_ratio: "",
   };
@@ -58,7 +49,6 @@ function rowToRecord(row: RowData, date: string): SignalRecord | null {
   if (!row.code && !row.name) return null;
 
   const turnover = row.turnover ? parseFloat(row.turnover) : null;
-  const chg = row.chg ? parseFloat(row.chg) : null;
   const amount = row.amount ? parseFloat(row.amount) : null;
   const debt_ratio = row.debt_ratio ? parseFloat(row.debt_ratio) : null;
   const sectors = row.sector
@@ -66,10 +56,10 @@ function rowToRecord(row: RowData, date: string): SignalRecord | null {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const sectorPattern =
-    row.sector_pattern === "水下拉水上" || row.sector_pattern === "波动三角收窄"
-      ? row.sector_pattern
-      : null;
+  const concepts = row.concept
+    .split(/[,，、]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   // 确保所有字段都是有效的
   const code = row.code.replace(/[^\d]/g, "").padStart(6, "0");
@@ -85,9 +75,10 @@ function rowToRecord(row: RowData, date: string): SignalRecord | null {
     code,
     name,
     sector: sectors.length > 0 ? sectors : ["未分类"], // 确保 sector 不为空数组
-    sector_pattern: sectorPattern,
+    concept: concepts,
+    sector_pattern: null,
     turnover: turnover != null && !isNaN(turnover) ? turnover : null,
-    chg: chg != null && !isNaN(chg) ? chg : null,
+    chg: null,
     amount: amount != null && !isNaN(amount) ? amount : null,
     debt_ratio: debt_ratio != null && !isNaN(debt_ratio) ? debt_ratio : null,
     score: 0,
@@ -140,11 +131,11 @@ export function SignalInput({
               const updated = {
                 ...r,
                 name: r.name || info.name || "",
-                chg: r.chg || (info.chg != null ? info.chg.toFixed(2) : "") || "",
                 turnover: r.turnover || (info.turnover != null ? info.turnover.toFixed(2) : "") || "",
                 amount: r.amount || (info.amount != null ? info.amount.toFixed(2) : "") || "",
                 debt_ratio: r.debt_ratio || (info.debt_ratio != null ? info.debt_ratio.toFixed(2) : "") || "",
                 sector: r.sector || (info.industry ? String(info.industry) : r.sector),
+                concept: r.concept || (info.concept && info.concept.length > 0 ? info.concept.join("、") : r.concept),
               };
               
               return updated;
@@ -229,9 +220,8 @@ export function SignalInput({
       r.code ||
       r.name ||
       r.sector ||
-      r.sector_pattern ||
+      r.concept ||
       r.turnover ||
-      r.chg ||
       r.amount ||
       r.debt_ratio
     );
@@ -261,9 +251,8 @@ export function SignalInput({
         code: "600519",
         name: "贵州茅台",
         sector: "白酒",
-        sector_pattern: "水下拉水上",
+        concept: "高端消费、酿酒",
         turnover: "3.2",
-        chg: "2.5",
         amount: "85",
         debt_ratio: "25.8",
       },
@@ -272,9 +261,8 @@ export function SignalInput({
         code: "002371",
         name: "北方华创",
         sector: "半导体",
-        sector_pattern: "波动三角收窄",
+        concept: "设备国产替代",
         turnover: "6.5",
-        chg: "5.1",
         amount: "42",
         debt_ratio: "38.5",
       },
@@ -283,9 +271,8 @@ export function SignalInput({
         code: "300750",
         name: "宁德时代",
         sector: "锂电池、新能源",
-        sector_pattern: "水下拉水上",
+        concept: "储能、动力电池",
         turnover: "8.1",
-        chg: "3.8",
         amount: "120",
         debt_ratio: "52.3",
       },
@@ -358,14 +345,11 @@ export function SignalInput({
                 <TableHead className="text-muted-foreground min-w-[140px] whitespace-nowrap">
                   板块
                 </TableHead>
-                <TableHead className="text-muted-foreground min-w-[130px] whitespace-nowrap">
-                  板块分时
+                <TableHead className="text-muted-foreground min-w-[140px] whitespace-nowrap">
+                  概念
                 </TableHead>
                 <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
                   换手率%
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
-                  涨跌幅%
                 </TableHead>
                 <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
                   市值(亿)
@@ -431,36 +415,15 @@ export function SignalInput({
                     )}
                   </TableCell>
                   <TableCell className="p-1">
-                    <Select
-                      value={row.sector_pattern}
-                      onValueChange={(val) =>
-                        updateRow(row.id, "sector_pattern", val)
+                    <Input
+                      value={row.concept}
+                      onChange={(e) =>
+                        updateRow(row.id, "concept", e.target.value)
                       }
-                    >
-                      <SelectTrigger className="h-8 bg-secondary text-foreground border-border text-xs px-2 [&>span]:truncate">
-                        <SelectValue placeholder="选择形态" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-card border-border text-foreground">
-                        <SelectItem
-                          value="none"
-                          className="text-xs text-muted-foreground focus:bg-secondary focus:text-foreground"
-                        >
-                          无
-                        </SelectItem>
-                        <SelectItem
-                          value="水下拉水上"
-                          className="text-xs text-foreground focus:bg-secondary focus:text-foreground"
-                        >
-                          水下拉水上
-                        </SelectItem>
-                        <SelectItem
-                          value="波动三角收窄"
-                          className="text-xs text-foreground focus:bg-secondary focus:text-foreground"
-                        >
-                          波动三角收窄
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                      placeholder="AI眼镜、低空经济"
+                      className="h-8 bg-secondary text-foreground border-border text-xs px-2"
+                      title={row.concept ? `概念: ${row.concept}` : "请输入概念（多个用、分隔）"}
+                    />
                   </TableCell>
                   <TableCell className="p-1">
                     <Input
@@ -477,23 +440,6 @@ export function SignalInput({
                       placeholder="3.2"
                       className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
                       title={row.turnover ? `换手率: ${row.turnover}%` : "请输入换手率或通过代码自动获取"}
-                    />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={row.chg}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        // 数据类型检测：只允许数字和小数点
-                        if (val === "" || /^-?\d*\.?\d*$/.test(val)) {
-                          updateRow(row.id, "chg", val);
-                        }
-                      }}
-                      placeholder="2.5"
-                      className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
-                      title={row.chg ? `涨跌幅: ${row.chg}%` : "请输入涨跌幅或通过代码自动获取"}
                     />
                   </TableCell>
                   <TableCell className="p-1">
@@ -615,7 +561,7 @@ export function SignalInput({
         </div>
 
         <p className="text-xs text-muted-foreground">
-        填写代码和名称即可录入。板块用顿号或逗号分隔多个。板块分时可选「水下拉水上」或「波动三角收窄」。
+        填写代码和名称即可录入。板块和概念支持多个，使用顿号或逗号分隔。
         </p>
     </div>
   );

@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTradeCal } from "@/lib/tushare";
+import {
+  approximateWeekendNonTradingDays,
+  getTradeCal,
+  isTushareCredentialError,
+} from "@/lib/tushare";
 
 /**
  * GET /api/tushare/trade-cal
@@ -32,6 +36,27 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ nonTradingDays });
   } catch (error: any) {
+    const { searchParams } = new URL(req.url);
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+
+    if (
+      startDate &&
+      endDate &&
+      isTushareCredentialError(error)
+    ) {
+      const nonTradingDays = approximateWeekendNonTradingDays(
+        startDate,
+        endDate
+      );
+      return NextResponse.json({
+        nonTradingDays,
+        approximate: true,
+        warning:
+          "Tushare Token 无效或未配置，已使用仅周末休市的近似日历（节假日休市日未排除）。",
+      });
+    }
+
     console.error("GET /api/tushare/trade-cal error:", error);
     return NextResponse.json(
       { error: error.message || "获取交易日历失败" },

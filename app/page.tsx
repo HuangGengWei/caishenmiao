@@ -78,7 +78,7 @@ export default function Page() {
                 财神庙
               </h1>
               <p className="text-xs text-muted-foreground mt-0.5">
-                板块分时 / 可视化
+                个股信号 / 可视化
               </p>
             </div>
           </div>

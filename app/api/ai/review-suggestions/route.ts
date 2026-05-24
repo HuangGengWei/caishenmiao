@@ -7,7 +7,7 @@ function formatStockData(records: any[]): string {
   return records
     .map(
       (r) =>
-        `- ${r.code} ${r.name} | 板块: ${(r.sector || []).join("、")} | 板块分时: ${r.sector_pattern || "-"} | 换手${r.turnover ?? "-"}% | 涨跌${r.chg != null ? r.chg + "%" : "-"} | 市值${r.amount ?? "-"}亿 | 负债率${r.debt_ratio ?? "-"}%`
+        `- ${r.code} ${r.name} | 板块: ${(r.sector || []).join("、")} | 概念: ${(r.concept || []).join("、") || "-"} | 换手${r.turnover ?? "-"}% | 市值${r.amount ?? "-"}亿 | 负债率${r.debt_ratio ?? "-"}%`
     )
     .join("\n");
 }

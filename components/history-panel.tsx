@@ -197,7 +197,7 @@ export function HistoryPanel({
     ? selectedSector.split("|")[1]
     : null;
 
-  // 加载选中日期的板块截图
+  // 加载选中日期的概念截图
   useEffect(() => {
     if (selectedDate) {
       getSectorScreenshotsForDate(selectedDate).then(setSectorScreenshots);
@@ -206,27 +206,27 @@ export function HistoryPanel({
     }
   }, [selectedDate, sectorShotVersion]);
 
-  // 当前选中日期下的板块聚合（名称 + 计数 + 均分），并且合并当天已上传截图但可能暂无个股的板块
+  // 当前选中日期下的概念聚合（名称 + 计数），并且合并当天已上传截图但可能暂无个股的概念
   const selectedDateSectors =
     selectedDate && selectedDateData
       ? (() => {
-          const sectorMap = new Map<string, { count: number }>();
+          const conceptMap = new Map<string, { count: number }>();
           for (const r of selectedDateData.records) {
-            for (const s of r.sector) {
-              const existing = sectorMap.get(s) ?? { count: 0 };
+            for (const c of (r.concept ?? [])) {
+              const existing = conceptMap.get(c) ?? { count: 0 };
               existing.count += 1;
-              sectorMap.set(s, existing);
+              conceptMap.set(c, existing);
             }
           }
 
-          // 把当天仅有截图、但当日可能没有个股记录的板块也合并进来
+          // 把当天仅有截图、但当日可能没有个股记录的概念也合并进来
           for (const shot of sectorScreenshots) {
-            if (!sectorMap.has(shot.sector)) {
-              sectorMap.set(shot.sector, { count: 0 });
+            if (!conceptMap.has(shot.sector)) {
+              conceptMap.set(shot.sector, { count: 0 });
             }
           }
 
-          return Array.from(sectorMap.entries())
+          return Array.from(conceptMap.entries())
             .map(([sector, { count }]) => {
               const shot = sectorScreenshots.find(
                 (s) => s.sector === sector
@@ -279,16 +279,16 @@ export function HistoryPanel({
     return "bg-muted/40";
   }
 
-  // Collect unique sectors for a day cell（用于左侧日历小标签）
-  function getDaySectors(data: DayCellData | undefined): string[] {
+  // Collect unique concepts for a day cell（用于左侧日历小标签）
+  function getDayConcepts(data: DayCellData | undefined): string[] {
     if (!data) return [];
-    const sectorSet = new Set<string>();
+    const conceptSet = new Set<string>();
     for (const r of data.records) {
-      for (const s of r.sector) {
-        sectorSet.add(s);
+      for (const c of (r.concept ?? [])) {
+        conceptSet.add(c);
       }
     }
-    return [...sectorSet];
+    return [...conceptSet];
   }
 
   // 即使没有数据也显示日历，方便用户点击日期添加数据
@@ -390,7 +390,7 @@ export function HistoryPanel({
                 const isSelected = cell.dateStr === selectedDate;
                 const hasData = !!cell.data;
                 const isTrading = isTradingDay(cell.dateStr, nonTradingDays);
-                const sectors = getDaySectors(cell.data);
+                const concepts = getDayConcepts(cell.data);
                 return (
                   <button
                     key={cell.dateStr}
@@ -400,15 +400,15 @@ export function HistoryPanel({
                       if (!isTrading) return;
                       if (isSelected) {
                         // 如果当前已经选中该日期：
-                        // 1）正在看具体板块个股 -> 只清空板块，回到该日板块列表
-                        // 2）正在看该日板块列表 -> 再点一次则清空日期选择
+                        // 1）正在看具体概念个股 -> 只清空概念，回到该日概念列表
+                        // 2）正在看该日概念列表 -> 再点一次则清空日期选择
                         if (selectedSector) {
                           setSelectedSector(null);
                         } else {
                           setSelectedDate(null);
                         }
                       } else {
-                        // 选择一个新的日期，默认进入板块列表视图
+                        // 选择一个新的日期，默认进入概念列表视图
                         setSelectedDate(cell.dateStr);
                         setSelectedSector(null);
                       }
@@ -453,9 +453,9 @@ export function HistoryPanel({
                         </span>
                       )}
                     </div>
-                    {sectors.length > 0 && (
+                    {concepts.length > 0 && (
                       <div className="flex flex-col gap-px w-full mt-0.5 overflow-hidden">
-                        {sectors.map((s) => (
+                        {concepts.map((s) => (
                           <div
                             key={s}
                             role={isTrading ? "button" : undefined}
@@ -506,12 +506,12 @@ export function HistoryPanel({
                         ))}
                         {cell.data &&
                           (() => {
-                            const totalSectors = new Set(
-                              cell.data.records.flatMap((r) => r.sector)
+                            const totalConcepts = new Set(
+                              cell.data.records.flatMap((r) => r.concept ?? [])
                             ).size;
-                            return totalSectors > 3 ? (
+                            return totalConcepts > 3 ? (
                               <span className="text-[9px] leading-tight text-muted-foreground/60">
-                                +{totalSectors - 3}
+                                +{totalConcepts - 3}
                               </span>
                             ) : null;
                           })()}
@@ -550,8 +550,8 @@ export function HistoryPanel({
             <CardTitle className="text-base font-semibold text-foreground">
               {selectedDate
                 ? selectedSector
-                  ? `${selectedDate} / ${selectedSector.split("|")[1]} 板块个股`
-                  : `${selectedDate} 板块概览`
+                  ? `${selectedDate} / ${selectedSector.split("|")[1]} 概念个股`
+                  : `${selectedDate} 概念概览`
                 : "日期详情"}
             </CardTitle>
             {selectedSector && (
@@ -561,7 +561,7 @@ export function HistoryPanel({
                 className="text-xs text-muted-foreground hover:text-foreground"
                 onClick={() => setSelectedSector(null)}
               >
-                返回板块列表
+                返回概念列表
               </Button>
             )}
           </CardHeader>
@@ -569,12 +569,12 @@ export function HistoryPanel({
             {selectedSector ? (
               <div className="flex flex-col gap-3">
                 <div className="text-sm font-semibold text-foreground mb-1">
-                  {selectedSectorName} 板块个股
+                  {selectedSectorName} 概念个股
                 </div>
                 <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto pr-1">
                   {selectedRecords
                     .filter((r) =>
-                      r.sector.includes(selectedSector.split("|")[1])
+                      (r.concept ?? []).includes(selectedSector.split("|")[1])
                     )
                     .sort((a, b) => a.code.localeCompare(b.code))
                     .map((r, i) => (
@@ -591,18 +591,6 @@ export function HistoryPanel({
                             <span className="font-semibold text-base text-foreground">
                               {r.name}
                             </span>
-                            {r.sector_pattern && (
-                              <Badge
-                                variant="outline"
-                                className={`text-xs px-2 py-0.5 h-6 font-semibold ${
-                                  r.sector_pattern === "水下拉水上"
-                                    ? "border-stock-up/60 text-stock-up bg-stock-up/10"
-                                    : "border-primary/60 text-primary bg-primary/10"
-                                }`}
-                              >
-                                {r.sector_pattern}
-                              </Badge>
-                            )}
                           </div>
                           
                           {/* 第二行：板块标签 */}
@@ -617,20 +605,22 @@ export function HistoryPanel({
                             ))}
                           </div>
                           
-                          {/* 第三行：关键指标 */}
-                          <div className="flex items-center gap-4 flex-wrap mt-1">
-                            {r.chg !== null && (
-                              <div className="flex items-center gap-1">
-                                <span className="text-xs text-muted-foreground">涨跌</span>
+                          {/* 第三行：概念标签 */}
+                          {(r.concept ?? []).length > 0 && (
+                            <div className="flex items-center flex-wrap gap-1.5">
+                              {(r.concept ?? []).map((c) => (
                                 <span
-                                  className={`text-sm font-bold ${
-                                    r.chg >= 0 ? "text-stock-up" : "text-stock-down"
-                                  }`}
+                                  key={c}
+                                  className="text-xs px-2 py-1 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 font-medium border border-amber-500/20"
                                 >
-                                  {r.chg >= 0 ? "+" : ""}{r.chg.toFixed(2)}%
+                                  {c}
                                 </span>
-                              </div>
-                            )}
+                              ))}
+                            </div>
+                          )}
+
+                          {/* 第四行：关键指标 */}
+                          <div className="flex items-center gap-4 flex-wrap mt-1">
                             {r.turnover !== null && (
                               <div className="flex items-center gap-1">
                                 <span className="text-xs text-muted-foreground">换手</span>
@@ -677,7 +667,7 @@ export function HistoryPanel({
                 )}
                 <div className="flex flex-col gap-3 flex-1 min-h-0">
                   <div className="text-sm font-semibold text-foreground">
-                    板块列表（点击板块查看个股）
+                    概念列表（点击概念查看个股）
                   </div>
                   <div className="flex flex-col gap-3 max-h-[360px] overflow-y-auto pr-1">
                         {selectedDateSectors.length > 0 ? (
@@ -703,37 +693,11 @@ export function HistoryPanel({
                               </Badge>
                             </div>
                           </div>
-                          <div
-                            className="mt-1 rounded-md border border-dashed border-border/60 bg-muted/40 flex items-center justify-center text-[11px] text-muted-foreground overflow-hidden max-h-64"
-                            onPaste={(e) => handlePasteSectorShot(e, s.sector)}
-                            tabIndex={0}
-                          >
-                            {s.imageDataUrl ? (
-                              <button
-                                type="button"
-                                className="w-full h-full flex items-center justify-center"
-                                onClick={() =>
-                                  setPreviewShot({
-                                    url: s.imageDataUrl as string,
-                                    title: `${selectedDate ?? ""} ${s.sector}`.trim(),
-                                  })
-                                }
-                              >
-                                <img
-                                  src={s.imageDataUrl}
-                                  alt={`${s.sector} 分时截图`}
-                                  className="w-full h-auto object-contain cursor-zoom-in"
-                                />
-                              </button>
-                            ) : (
-                              "分时截图（选中此区域后直接 Ctrl+V 粘贴图片上传）"
-                            )}
-                          </div>
                         </div>
                       ))
                     ) : (
                       <p className="text-xs text-muted-foreground">
-                        当前日期下暂无板块统计，可先录入当日个股信号。
+                        当前日期下暂无概念统计，可先录入当日个股信号。
                       </p>
                     )}
                   </div>
@@ -741,7 +705,7 @@ export function HistoryPanel({
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">
-                点击日历中的日期，在右侧查看或录入当日信号与板块分时截图。
+                点击日历中的日期，在右侧查看或录入当日信号与概念数据。
               </p>
             )}
           </CardContent>
@@ -752,7 +716,7 @@ export function HistoryPanel({
       <Card className="border-border bg-card">
         <CardHeader className="pb-3">
           <CardTitle className="text-base font-semibold text-foreground">
-            板块统计（近30天出现次数排名）
+            概念统计（近30天出现次数排名）
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -795,7 +759,7 @@ export function HistoryPanel({
             <DialogHeader className="flex-shrink-0">
               <DialogTitle>信号数据录入</DialogTitle>
               <DialogDescription>
-                {selectedDate} 的个股与板块数据，可在此一次性录入或修改。
+                {selectedDate} 的个股与概念数据，可在此一次性录入或修改。
               </DialogDescription>
             </DialogHeader>
             <div className="mt-2 flex-1 overflow-auto pr-2 min-h-0">

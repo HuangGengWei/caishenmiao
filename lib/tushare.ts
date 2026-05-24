@@ -1,8 +1,44 @@
-// Tushare API 服务（token 和自定义网关地址从 .env 读取）
+// Tushare API 服务（默认直连官网，可通过 .env 覆盖）
 const TUSHARE_TOKEN = process.env.TUSHARE_TOKEN ?? "";
-// 要求：必须通过自定义网关调用，而不是官方默认地址
 const TUSHARE_API_URL =
-  process.env.TUSHARE_HTTP_URL || "http://lianghua.nanyangqiankun.top";
+  process.env.TUSHARE_HTTP_URL || "https://api.tushare.pro";
+// 统一节流 Tushare 请求，避免触发 daily 接口 500 次/分钟限频
+const TUSHARE_MIN_INTERVAL_MS = Number(process.env.TUSHARE_MIN_INTERVAL_MS ?? "250");
+const TUSHARE_RATE_LIMIT_RETRY_MS = Number(process.env.TUSHARE_RATE_LIMIT_RETRY_MS ?? "1200");
+const TUSHARE_CACHE_TTL_MS = Number(process.env.TUSHARE_CACHE_TTL_MS ?? "300000"); // 默认5分钟缓存
+let tushareNextRequestAt = 0;
+let tushareQueue: Promise<void> = Promise.resolve();
+
+// 内存缓存：key -> { data, timestamp }
+const tushareCache: Record<string, { data: any; timestamp: number }> = {};
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** 生成缓存 key */
+function getCacheKey(apiName: string, params: Record<string, any>): string {
+  const sortedParams = Object.keys(params)
+    .sort()
+    .map((k) => `${k}=${params[k]}`)
+    .join("&");
+  return `${apiName}:${sortedParams}`;
+}
+
+/** 从缓存获取数据（过期则返回 null） */
+function getFromCache(key: string): any | null {
+  const entry = tushareCache[key];
+  if (!entry) return null;
+  const now = Date.now();
+  if (now - entry.timestamp > TUSHARE_CACHE_TTL_MS) {
+    delete tushareCache[key];
+    return null;
+  }
+  return entry.data;
+}
+
+/** 存入缓存 */
+function setToCache(key: string, data: any): void {
+  tushareCache[key] = { data, timestamp: Date.now() };
+}
 
 interface TushareResponse<T = any> {
   request_id: string;
@@ -14,8 +50,68 @@ interface TushareResponse<T = any> {
   };
 }
 
+/** 是否为 Token 缺失/无效/权限类错误（用于降级与减少重复日志） */
+export function isTushareCredentialError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!msg) return false;
+  return (
+    /无效|token|Token|TUSHARE|未配置|权限|过期|认证|Unauthorized/i.test(msg)
+  );
+}
+
+/** 是否为频率超限错误（用于限频重试） */
+function isTushareRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!msg) return false;
+  return /频率超限|rate.?limit|too many requests|429/i.test(msg);
+}
+
+/** 全局排队 + 最小间隔，确保多并发时也不会瞬间打满额度 */
+async function acquireTushareRequestSlot(): Promise<void> {
+  const scheduled = tushareQueue.then(async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, tushareNextRequestAt - now);
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+    tushareNextRequestAt = Date.now() + Math.max(0, TUSHARE_MIN_INTERVAL_MS);
+  });
+  // 无论当前任务成功失败，都要让队列继续流动
+  tushareQueue = scheduled.catch(() => {});
+  await scheduled;
+}
+
 /**
- * 调用 Tushare API
+ * Token 不可用时，用「仅周末休市」近似非交易日（不含法定节假日休市），供交易天数等展示降级。
+ * @param startYmd / endYmd 格式 YYYYMMDD
+ * @returns YYYY-MM-DD 非交易日列表
+ */
+export function approximateWeekendNonTradingDays(
+  startYmd: string,
+  endYmd: string
+): string[] {
+  const y = (s: string, a: number, b: number) => Number(s.slice(a, b));
+  const start = new Date(y(startYmd, 0, 4), y(startYmd, 4, 6) - 1, y(startYmd, 6, 8));
+  const end = new Date(y(endYmd, 0, 4), y(endYmd, 4, 6) - 1, y(endYmd, 6, 8));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const out: string[] = [];
+  for (
+    let cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    cur <= end;
+    cur.setDate(cur.getDate() + 1)
+  ) {
+    const dow = cur.getDay();
+    if (dow === 0 || dow === 6) {
+      out.push(
+        `${cur.getFullYear()}-${pad(cur.getMonth() + 1)}-${pad(cur.getDate())}`
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * 调用 Tushare API（带缓存）
  */
 async function callTushareAPI(
   apiName: string,
@@ -25,47 +121,73 @@ async function callTushareAPI(
   if (!TUSHARE_TOKEN?.trim()) {
     throw new Error("未配置 TUSHARE_TOKEN，请在 .env 中设置 TUSHARE_TOKEN");
   }
-  try {
-    const response = await fetch(TUSHARE_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        api_name: apiName,
-        token: TUSHARE_TOKEN,
-        params,
-        fields: fields.join(","),
-      }),
-    });
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const result: TushareResponse = await response.json();
-
-    if (result.code !== 0) {
-      throw new Error(result.msg || "API调用失败");
-    }
-
-    if (!result.data) {
-      return [];
-    }
-
-    // 将数据转换为对象数组
-    const { fields: fieldNames, items } = result.data;
-    return items.map((item) => {
-      const obj: Record<string, any> = {};
-      fieldNames.forEach((field, index) => {
-        obj[field] = item[index];
-      });
-      return obj;
-    });
-  } catch (error) {
-    console.error(`Tushare API ${apiName} error:`, error);
-    throw error;
+  // 检查缓存
+  const cacheKey = getCacheKey(apiName, params);
+  const cached = getFromCache(cacheKey);
+  if (cached !== null) {
+    return cached;
   }
+
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await acquireTushareRequestSlot();
+      const response = await fetch(TUSHARE_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          api_name: apiName,
+          token: TUSHARE_TOKEN,
+          params,
+          fields: fields.join(","),
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result: TushareResponse = await response.json();
+
+      if (result.code !== 0) {
+        throw new Error(result.msg || "API调用失败");
+      }
+
+      if (!result.data) {
+        setToCache(cacheKey, []);
+        return [];
+      }
+
+      // 将数据转换为对象数组
+      const { fields: fieldNames, items } = result.data;
+      const data = items.map((item) => {
+        const obj: Record<string, any> = {};
+        fieldNames.forEach((field, index) => {
+          obj[field] = item[index];
+        });
+        return obj;
+      });
+
+      // 存入缓存
+      setToCache(cacheKey, data);
+      return data;
+    } catch (error) {
+      const shouldRetry =
+        attempt < maxAttempts && isTushareRateLimitError(error);
+      if (shouldRetry) {
+        await sleep(Math.max(0, TUSHARE_RATE_LIMIT_RETRY_MS));
+        continue;
+      }
+      if (!isTushareCredentialError(error)) {
+        console.error(`Tushare API ${apiName} error:`, error);
+      }
+      throw error;
+    }
+  }
+  return [];
 }
 
 /**
@@ -146,7 +268,7 @@ export async function getDaily(
   return callTushareAPI(
     "daily",
     {
-      ts_code,
+      ts_code: tsCode,
       trade_date: tradeDate,
     },
     [
@@ -281,6 +403,32 @@ export async function getLimitUpDatesAround(
     }
   }
   return result;
+}
+
+/** 获取最近一次涨停日期（距今天最近的涨停日） */
+export async function getLastLimitUpDate(code: string): Promise<string | null> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(start.getDate() - 180); // 查找近180个自然日
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const rows = await getDailyRange(tsCode, fmt(start), fmt(today));
+  if (!rows || rows.length === 0) return null;
+
+  const THRESHOLD = 9.8;
+  // 按日期降序，找到最近的涨停日
+  const sorted = [...rows].sort((a, b) => b.trade_date.localeCompare(a.trade_date));
+  for (const r of sorted) {
+    if (typeof r.pct_chg === "number" && r.pct_chg >= THRESHOLD) {
+      const td = r.trade_date;
+      return `${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -530,15 +678,19 @@ export type DailyChartPoint = {
   close: number;
   ma5: number | null;
   ma30: number | null;
+  vol5: number | null;  // 5日成交量均线（手）
+  v10: number | null; // 10日成交量均线（手）
 };
 
 /**
- * 获取近30个交易日行情用于图表：收盘价、5日均线、30日均线
+ * 获取近30个交易日行情用于图表：收盘价、5日均线、30日均线、成交量均线
  * 需要约60个交易日数据以计算每日的 MA30
  */
 export async function getDailyChartData(code: string): Promise<{
   series: DailyChartPoint[];
   near: boolean;
+  lastCrossDate: string | null;
+  volNear: boolean;
 } | null> {
   const tsCode = codeToTsCode(code);
   if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
@@ -564,13 +716,20 @@ export async function getDailyChartData(code: string): Promise<{
     const date = `${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`;
     const slice5 = use.slice(k, k + 5);
     const slice30 = use.slice(k, k + 30);
+    const slice10 = use.slice(k, k + 10);
     const ma5 = slice5.length >= 5
       ? Math.round((slice5.reduce((s, r) => s + r.close, 0) / 5) * 100) / 100
       : null;
     const ma30 = slice30.length >= 30
       ? Math.round((slice30.reduce((s, r) => s + r.close, 0) / 30) * 100) / 100
       : null;
-    series.push({ date, close: Math.round(close * 100) / 100, ma5, ma30 });
+    const vol5 = slice5.length >= 5
+      ? Math.round(slice5.reduce((s, r) => s + (r.vol || 0), 0) / 5)
+      : null;
+    const v10 = slice10.length >= 10
+      ? Math.round(slice10.reduce((s, r) => s + (r.vol || 0), 0) / 10)
+      : null;
+    series.push({ date, close: Math.round(close * 100) / 100, ma5, ma30, vol5, v10 });
   }
 
   const ma5Latest = use.slice(0, 5).reduce((s, r) => s + r.close, 0) / 5;
@@ -585,7 +744,164 @@ export async function getDailyChartData(code: string): Promise<{
   const typicalNearMa30 =
     minTypical > 0 && Math.abs(typicalPrice - ma30Latest) / minTypical < MA5_MA30_NEAR_THRESHOLD;
 
-  return { series, near, typicalNearMa30 };
+  // 计算上次 MA5 与 MA30 交叉的日期（从最新往前找）
+  let lastCrossDate: string | null = null;
+  for (let i = 0; i < series.length - 1; i++) {
+    const curr = series[i];
+    const prev = series[i + 1];
+    if (curr.ma5 != null && curr.ma30 != null && prev.ma5 != null && prev.ma30 != null) {
+      const currDiff = curr.ma5 - curr.ma30;
+      const prevDiff = prev.ma5 - prev.ma30;
+      // 交叉：当前和之前的差值符号不同，或任一为0（重合）
+      if (currDiff * prevDiff < 0 || currDiff === 0) {
+        lastCrossDate = curr.date;
+        break;
+      }
+    }
+  }
+
+  // 5日成交量与10日成交量是否接近
+  const vol5Latest = use.slice(0, 5).reduce((s, r) => s + (r.vol || 0), 0) / 5;
+  const v10Latest = use.slice(0, 10).reduce((s, r) => s + (r.vol || 0), 0) / 10;
+  const minVol = Math.min(vol5Latest, v10Latest);
+  const volNear = minVol > 0 && Math.abs(vol5Latest - v10Latest) / minVol < MA5_MA30_NEAR_THRESHOLD;
+
+  return { series, near, typicalNearMa30, lastCrossDate, volNear };
+}
+
+/**
+ * 获取每日指标（换手率、市值等）
+ * Tushare 接口: daily_basic
+ * @param tsCode 股票代码（如 000001.SZ）
+ * @param tradeDate 交易日期 YYYYMMDD
+ */
+export async function getDailyBasic(
+  tsCode: string,
+  tradeDate: string
+): Promise<{
+  turnover: number | null;  // 换手率 %
+  totalMv: number | null;   // 总市值（万元）
+  peTTM: number | null;     // PE(TTM)
+} | null> {
+  try {
+    const rows = await callTushareAPI(
+      "daily_basic",
+      { ts_code: tsCode, trade_date: tradeDate },
+      ["ts_code", "trade_date", "turnover_rate", "total_mv", "pe_ttm"]
+    );
+    if (!rows || rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      turnover: typeof r.turnover_rate === "number" ? r.turnover_rate : null,
+      totalMv: typeof r.total_mv === "number" ? r.total_mv : null,
+      peTTM: typeof r.pe_ttm === "number" ? r.pe_ttm : null,
+    };
+  } catch (e) {
+    console.warn("获取 daily_basic 失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 获取股东人数
+ * Tushare 接口: share_number
+ * 取该股票最新一期的股东人数
+ * @param tsCode 股票代码（如 000001.SZ）
+ */
+export async function getShareNumber(
+  tsCode: string
+): Promise<{
+  holderNum: number | null; // 股东人数
+  annDate: string | null;   // 公告日期 YYYYMMDD
+} | null> {
+  try {
+    const rows = await callTushareAPI(
+      "stk_holdernumber",
+      { ts_code: tsCode },
+      ["ts_code", "ann_date", "end_date", "holder_num"]
+    );
+    if (!rows || rows.length === 0) return null;
+
+    // 按 end_date 降序排列，取最新一期
+    const sorted = [...rows].sort((a, b) => {
+      const da = String(a.end_date || "");
+      const db = String(b.end_date || "");
+      return db.localeCompare(da);
+    });
+    const latest = sorted[0];
+    return {
+      holderNum: typeof latest.holder_num === "number" ? latest.holder_num : null,
+      annDate: String(latest.ann_date || latest.end_date || ""),
+    };
+  } catch (e) {
+    console.warn("获取 share_number 失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 获取财务指标（资产负债率）
+ * Tushare 接口: fina_indicator
+ * 取该股票最新一期财报的 debt_to_assets 字段
+ * @param tsCode 股票代码（如 000001.SZ）
+ */
+export async function getFinaIndicator(
+  tsCode: string
+): Promise<{
+  debtToAssets: number | null; // 资产负债率 %
+  annDate: string | null;      // 公告日期 YYYYMMDD
+} | null> {
+  try {
+    const rows = await callTushareAPI(
+      "fina_indicator",
+      { ts_code: tsCode },
+      ["ts_code", "ann_date", "end_date", "debt_to_assets"]
+    );
+    if (!rows || rows.length === 0) return null;
+
+    // 按 ann_date 降序排列，取最新一期
+    const sorted = [...rows].sort((a, b) => {
+      const da = String(a.ann_date || a.end_date || "");
+      const db = String(b.ann_date || b.end_date || "");
+      return db.localeCompare(da);
+    });
+    const latest = sorted[0];
+    return {
+      debtToAssets: typeof latest.debt_to_assets === "number" ? latest.debt_to_assets : null,
+      annDate: String(latest.ann_date || latest.end_date || ""),
+    };
+  } catch (e) {
+    console.warn("获取 fina_indicator 失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 获取股票所属概念（同花顺概念分类）
+ * Tushare 接口: ths_member
+ * @param tsCode 股票代码（如 000001.SZ）
+ */
+export async function getStockConcepts(
+  tsCode: string
+): Promise<string[]> {
+  try {
+    const rows = await callTushareAPI(
+      "ths_member",
+      { ts_code: tsCode },
+      ["ts_code", "con_code", "con_name"]
+    );
+    if (!rows || rows.length === 0) return [];
+    // 去重并过滤空值
+    const concepts = [...new Set(
+      rows
+        .map((r: any) => r.con_name ? String(r.con_name).trim() : "")
+        .filter(Boolean)
+    )];
+    return concepts;
+  } catch (e) {
+    console.warn("获取 ths_member 失败:", e);
+    return [];
+  }
 }
 
 /**
@@ -599,10 +915,13 @@ export async function getStockInfo(
 ): Promise<{
   name: string;
   industry: string | null;
+  concept: string[];
   chg: number | null;
   turnover: number | null;
   amount: number | null;
   debt_ratio: number | null;
+  peTTM: number | null;
+  holderNum: number | null; // 股东人数
 } | null> {
   try {
     const cleanCode = code.replace(/[^\d]/g, "").padStart(6, "0");
@@ -610,21 +929,17 @@ export async function getStockInfo(
       return null;
     }
 
-    // 使用 ts_code 进行精确查询，避免 symbol 查询返回多条结果
     const tsCode = codeToTsCode(cleanCode);
     if (!tsCode) {
       return null;
     }
 
-    // 使用 ts_code 精确查询（ts_code 是唯一的，应该只返回一条结果）
     const basicInfo = await getStockBasic(tsCode);
     if (!basicInfo || basicInfo.length === 0) {
       return null;
     }
 
-    // 取第一条结果（ts_code 查询应该只返回一条）
     const stock = basicInfo[0];
-    // 规范化比较：Tushare 的 symbol 可能无前导零（如 "1"），与 cleanCode "000001" 视为一致
     const normalizedReturn = String(stock.symbol ?? "").replace(/[^\d]/g, "").padStart(6, "0");
     if (normalizedReturn !== cleanCode) {
       console.error(`代码查询不匹配: 输入 ${cleanCode}, 返回 symbol ${stock.symbol} -> ${normalizedReturn}, 股票名称: ${stock.name}`);
@@ -633,33 +948,436 @@ export async function getStockInfo(
     let chg: number | null = null;
     let turnover: number | null = null;
     let amount: number | null = null;
+    let debt_ratio: number | null = null;
+    let peTTM: number | null = null;
+    let holderNum: number | null = null;
+    let concepts: string[] = [];
 
-    // 如果有交易日期，获取日线行情
-    if (tradeDate && stock.ts_code) {
-      try {
-        const dailyData = await getDaily(stock.ts_code, tradeDate);
-        if (dailyData && dailyData.length > 0) {
-          const daily = dailyData[0];
-          chg = daily.pct_chg || null;
-          // amount 可以从 daily.amount 获取（成交额，单位：千元）
-          amount = daily.amount ? daily.amount / 100000 : null; // 转换为亿元
+    // 顺序获取日线行情、每日指标、财务指标、概念（避免并发触发限频）
+    if (stock.ts_code) {
+      // 日线行情 → 涨跌幅
+      if (tradeDate) {
+        try {
+          const dailyRows = await getDaily(stock.ts_code, tradeDate);
+          if (dailyRows && dailyRows.length > 0) {
+            chg = dailyRows[0].pct_chg || null;
+          }
+        } catch (e) {
+          console.warn("获取日线行情失败:", e);
         }
-      } catch (dailyError) {
-        // 日线数据获取失败不影响基本信息返回
-        console.warn("获取日线数据失败:", dailyError);
+      }
+
+      // 每日指标 → 换手率 + 总市值（万元→亿元）+ PE(TTM)
+      if (tradeDate) {
+        try {
+          const db = await getDailyBasic(stock.ts_code, tradeDate);
+          if (db) {
+            turnover = db.turnover;
+            amount = db.totalMv != null ? Math.round((db.totalMv / 10000) * 100) / 100 : null;
+            peTTM = db.peTTM;
+          }
+        } catch (e) {
+          console.warn("获取每日指标失败:", e);
+        }
+      }
+
+      // 财务指标 → 资产负债率
+      try {
+        const fina = await getFinaIndicator(stock.ts_code);
+        if (fina) {
+          debt_ratio = fina.debtToAssets;
+        }
+      } catch (e) {
+        console.warn("获取财务指标失败:", e);
+      }
+
+      // 概念 → 概念列表
+      try {
+        concepts = await getStockConcepts(stock.ts_code);
+      } catch (e) {
+        console.warn("获取概念失败:", e);
+      }
+
+      // 股东人数
+      try {
+        const share = await getShareNumber(stock.ts_code);
+        if (share) {
+          holderNum = share.holderNum;
+        }
+      } catch (e) {
+        console.warn("获取股东人数失败:", e);
       }
     }
 
     return {
       name: stock.name,
-      industry: stock.industry || null, // 行业信息，可用于板块提示
+      industry: stock.industry || null,
+      concept: concepts,
       chg,
-      turnover, // 换手率需要从其他接口获取
+      turnover,
       amount,
-      debt_ratio: null, // 资产负债率需要从财务数据接口获取
+      debt_ratio,
+      peTTM,
+      holderNum,
     };
   } catch (error) {
     console.error("获取股票信息失败:", error);
     return null;
   }
+}
+
+/**
+ * 单个前高点信息
+ */
+export type HighPoint = {
+  price: number;           // 高点价格
+  date: string;            // 高点日期 YYYY-MM-DD
+  proximityPercent: number; // 目标价距离该高点的百分比
+  aboveOrBelow: "above" | "below" | "equal"; // 目标价与该高点关系
+};
+
+/**
+ * 获取股票多个前高点（第一/二/三高点）及其与"最新收盘价+10%"的距离
+ * 第一高点 = 最高价，第二高点 = 次高价（且与第一高点间隔至少20个交易日），以此类推
+ * @param code 6位股票代码
+ * @returns 多个前高点信息，若无法计算返回 null
+ */
+export async function getHighProximity(
+  code: string
+): Promise<{
+  highPoints: HighPoint[];       // 多个前高点（按价格降序）
+  latestClose: number;           // 最新收盘价
+  latestTradeDate: string;       // 最新交易日 YYYY-MM-DD
+  targetPrice: number;           // 最新收盘价 + 10%
+  nearestHighIndex: number;      // 距离目标价最近的高点索引（-1表示无）
+} | null> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  // 取近 365 个自然日的日线数据
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(start.getDate() - 365);
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const rows = await getDailyRange(tsCode, fmt(start), fmt(today));
+  if (!rows || rows.length < 20) {
+    return null;
+  }
+
+  // 按日期正序排列，并记录每个交易日的索引
+  const sorted = [...rows].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+
+  // 格式化日期 YYYYMMDD → YYYY-MM-DD
+  const formatDate = (ymd: string) =>
+    `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
+
+  // 找出多个前高点：按最高价降序，每个高点之间需间隔至少 MIN_GAP_DAYS 个交易日
+  const MIN_GAP_DAYS = 20; // 高点之间最小间隔天数
+  const highPointsRaw: { price: number; date: string; index: number }[] = [];
+
+  // 收集所有高点候选（按价格降序）
+  const candidates = sorted
+    .map((r, idx) => ({ price: r.high, date: r.trade_date, index: idx }))
+    .filter(r => typeof r.price === "number" && r.price > 0)
+    .sort((a, b) => b.price - a.price);
+
+  // 选出间隔足够的前高点（最多3个）
+  for (const c of candidates) {
+    // 检查是否与已选高点间隔足够
+    const hasNearby = highPointsRaw.some(h => 
+      Math.abs(h.index - c.index) < MIN_GAP_DAYS
+    );
+    if (!hasNearby) {
+      highPointsRaw.push(c);
+      if (highPointsRaw.length >= 3) break;
+    }
+  }
+
+  if (highPointsRaw.length === 0) {
+    return null;
+  }
+
+  // 最新收盘价（最后一条记录）
+  const latest = sorted[sorted.length - 1];
+  const latestClose = latest.close;
+  const latestTradeDate = latest.trade_date;
+
+  if (typeof latestClose !== "number" || latestClose <= 0) {
+    return null;
+  }
+
+  // 目标价 = 最新收盘价 + 10%
+  const targetPrice = latestClose * 1.10;
+
+  // 计算每个高点与目标价的关系
+  const highPoints: HighPoint[] = highPointsRaw.map(h => {
+    const diff = targetPrice - h.price;
+    const proximityPercent = Math.abs(diff) / h.price * 100;
+    let aboveOrBelow: "above" | "below" | "equal";
+    if (Math.abs(diff) < 0.01) {
+      aboveOrBelow = "equal";
+    } else if (diff > 0) {
+      aboveOrBelow = "above";
+    } else {
+      aboveOrBelow = "below";
+    }
+    return {
+      price: Math.round(h.price * 100) / 100,
+      date: formatDate(h.date),
+      proximityPercent: Math.round(proximityPercent * 100) / 100,
+      aboveOrBelow,
+    };
+  });
+
+  // 找距离目标价最近的高点
+  let nearestHighIndex = -1;
+  let minProximity = Infinity;
+  for (let i = 0; i < highPoints.length; i++) {
+    if (highPoints[i].proximityPercent < minProximity) {
+      minProximity = highPoints[i].proximityPercent;
+      nearestHighIndex = i;
+    }
+  }
+
+  return {
+    highPoints,
+    latestClose: Math.round(latestClose * 100) / 100,
+    latestTradeDate: formatDate(latestTradeDate),
+    targetPrice: Math.round(targetPrice * 100) / 100,
+    nearestHighIndex,
+  };
+}
+
+/**
+ * 获取股票周线数据
+ * @param tsCode 股票代码（如 000001.SZ）
+ * @param startDate 开始日期 YYYYMMDD
+ * @param endDate 结束日期 YYYYMMDD
+ */
+export async function getWeeklyData(
+  tsCode: string,
+  startDate: string,
+  endDate: string
+): Promise<Array<{
+  ts_code: string;
+  trade_date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vol: number;
+  amount: number;
+}>> {
+  return callTushareAPI(
+    "weekly",
+    {
+      ts_code: tsCode,
+      start_date: startDate,
+      end_date: endDate,
+    },
+    ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"]
+  );
+}
+
+/**
+ * 周线成交量形态分析结果
+ * 分析最近4周（包含本周）
+ */
+export interface WeeklyVolumePattern {
+  hasPattern: boolean; // 是否符合"放量-缩量-再放量"形态
+  patternStrength: number; // 形态强度评分 (0-100)
+  description: string; // 形态描述
+  weekCount: number; // 分析的周数
+  weeklyVolumes: number[]; // 各周成交量（最近4周，从远到近：W4, W3, W2, W1）
+  weekMinus1Volume: number; // W1 - 最近一周（本周）
+  weekMinus2Volume: number; // W2 - 前1周
+  weekMinus3Volume: number; // W3 - 前2周
+  weekMinus4Volume: number; // W4 - 前3周（最早）
+}
+
+/**
+ * 检测周线成交量"放量→缩量→再放量"形态
+ * 分析最近4周（包含本周）
+ * 形态：W4(放量) → W3(缩量) → W2(缩量) → W1(再放量)
+ */
+export async function analyzeWeeklyVolumePattern(
+  code: string
+): Promise<WeeklyVolumePattern> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) {
+    return {
+      hasPattern: false,
+      patternStrength: 0,
+      description: "无法识别股票代码",
+      weekCount: 0,
+      weeklyVolumes: [],
+      weekMinus1Volume: 0,
+      weekMinus2Volume: 0,
+      weekMinus3Volume: 0,
+      weekMinus4Volume: 0,
+    };
+  }
+
+  // 获取近8周的周线数据
+  const today = new Date();
+  const startDate = new Date(today);
+  startDate.setDate(startDate.getDate() - 60); // 约8周
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const weeklyData = await getWeeklyData(tsCode, fmt(startDate), fmt(today));
+
+  // 需要至少4条周线数据
+  if (!weeklyData || weeklyData.length < 4) {
+    return {
+      hasPattern: false,
+      patternStrength: 0,
+      description: "周线数据不足",
+      weekCount: weeklyData?.length || 0,
+      weeklyVolumes: [],
+      weekMinus1Volume: 0,
+      weekMinus2Volume: 0,
+      weekMinus3Volume: 0,
+      weekMinus4Volume: 0,
+    };
+  }
+
+  // 按日期降序，取最近4周（sorted[0-3]，包含本周）
+  const sorted = [...weeklyData].sort((a, b) => b.trade_date.localeCompare(a.trade_date));
+
+  const w1 = sorted[0]; // 最近一周（本周）
+  const w2 = sorted[1]; // 前1周
+  const w3 = sorted[2]; // 前2周
+  const w4 = sorted[3]; // 前3周（最早）
+
+  if (!w1 || !w2 || !w3 || !w4) {
+    return {
+      hasPattern: false,
+      patternStrength: 0,
+      description: "周线数据不足",
+      weekCount: weeklyData.length,
+      weeklyVolumes: [],
+      weekMinus1Volume: 0,
+      weekMinus2Volume: 0,
+      weekMinus3Volume: 0,
+      weekMinus4Volume: 0,
+    };
+  }
+
+  // 从远到近：W4, W3, W2, W1
+  const v4 = w4.vol || 0; // 最早（放量端1）
+  const v3 = w3.vol || 0; // 缩量
+  const v2 = w2.vol || 0; // 缩量
+  const v1 = w1.vol || 0; // 最近（放量端2，本周）
+
+  const weeklyVolumes = [v4, v3, v2, v1]; // 从远到近
+
+  // ── 主升过滤：排除涨幅过大的股票 ──
+  const p4 = w4.close || 0; // W4 收盘价（最早）
+  const p3 = w3.close || 0;
+  const p2 = w2.close || 0;
+  const p1 = w1.close || 0; // W1 收盘价（最近）
+
+  // 计算各周涨幅
+  const week4Change = p4 > 0 && p3 > 0 ? (p3 - p4) / p4 : 0; // W4 → W3 涨幅
+  const week3Change = p3 > 0 && p2 > 0 ? (p2 - p3) / p3 : 0; // W3 → W2 涨幅
+  const week2Change = p2 > 0 && p1 > 0 ? (p1 - p2) / p2 : 0; // W2 → W1 涨幅
+
+  // 累计涨幅：W4 → W1 的总涨幅
+  const totalChange = p4 > 0 && p1 > 0 ? (p1 - p4) / p4 : 0;
+
+  // 过滤条件：
+  // 1. 累计涨幅不超过 25%（排除已走完主升的股票）
+  // 2. 单周涨幅不超过 20%（排除极端波动）
+  const MAX_TOTAL_CHANGE = 0.25;
+  const MAX_WEEK_CHANGE = 0.20;
+  const isReasonableChange = totalChange <= MAX_TOTAL_CHANGE &&
+    Math.abs(week4Change) <= MAX_WEEK_CHANGE &&
+    Math.abs(week3Change) <= MAX_WEEK_CHANGE &&
+    Math.abs(week2Change) <= MAX_WEEK_CHANGE;
+
+  // ── 核心形态判断 ──
+  const middleAvg = (v2 + v3) / 2; // 中间两周均值
+
+  // 两端放量程度
+  const leftRatio = middleAvg > 0 ? v4 / middleAvg : 0;   // W-4 相对中间的放量倍数
+  const rightRatio = middleAvg > 0 ? v1 / middleAvg : 0;   // W-1 相对中间的放量倍数
+
+  // 中间缩量确认：W-2 和 W-3 都小于各自相邻的放量端
+  const isMiddleShrunk = v2 < v1 && v2 < v4 && v3 < v1 && v3 < v4;
+
+  // 两端接近度：W-1 / W-4 在 [0.7, 1.5] 之间
+  const endRatio = v4 > 0 ? v1 / v4 : 0;
+  const areEndsClose = endRatio >= 0.7 && endRatio <= 1.5;
+
+  // 两端放量阈值：至少 1.3 倍于中间均值
+  const MIN_BURST_RATIO = 1.3;
+  const isLeftBurst = leftRatio >= MIN_BURST_RATIO;
+  const isRightBurst = rightRatio >= MIN_BURST_RATIO;
+
+  // ── 形态成立条件 ──
+  // 需要满足：两端放量 + 中间缩量 + 两端对称 + 涨幅合理
+  const hasPattern = isLeftBurst && isRightBurst && isMiddleShrunk && areEndsClose && isReasonableChange;
+
+  // ── 完美度评分（用于排序）──
+  // 即使不完全符合形态，也计算一个完美度分数，方便排序
+  let patternStrength = 0;
+
+  // 1. 放量程度评分（两端放量倍数，适中为佳）
+  // 最佳放量倍数在 1.5-2.5 之间，过高或过低都扣分
+  const idealBurst = 2.0;
+  const leftBurstScore = Math.max(0, 20 - Math.abs(leftRatio - idealBurst) * 10);
+  const rightBurstScore = Math.max(0, 20 - Math.abs(rightRatio - idealBurst) * 10);
+  patternStrength += leftBurstScore + rightBurstScore;
+
+  // 2. 缩量程度评分（中间两周相对两端越小越好）
+  const shrinkRatio = (v2 + v3) / Math.max(v1 + v4, 1);
+  const shrinkScore = Math.min(30, Math.round((1 - shrinkRatio) * 50));
+  patternStrength += shrinkScore;
+
+  // 3. 对称性评分（W-1 和 W-4 越接近越好）
+  const symmetry = Math.max(0, 1 - Math.abs(endRatio - 1) / 0.5);
+  patternStrength += Math.round(symmetry * 20);
+
+  // 4. 涨幅合理性评分
+  if (isReasonableChange) {
+    patternStrength += 10;
+  }
+
+  // 如果完全符合形态条件，额外加分
+  if (hasPattern) {
+    patternStrength += 20;
+  }
+
+  patternStrength = Math.max(0, Math.min(100, patternStrength));
+
+  // ── 描述 ──
+  // 计算缩量程度百分比
+  const shrinkPercent = Math.round((1 - shrinkRatio) * 100);
+  const leftPercent = Math.round((leftRatio - 1) * 100);
+  const rightPercent = Math.round((rightRatio - 1) * 100);
+  
+  let description = "";
+  if (hasPattern) {
+    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}%`;
+  } else if (!isReasonableChange) {
+    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}% | 涨幅过大`;
+  } else {
+    // 无论是否符合形态，都显示百分比信息
+    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}%`;
+  }
+
+  return {
+    hasPattern,
+    patternStrength,
+    description,
+    weekCount: 4,
+    weeklyVolumes,
+    weekMinus1Volume: Math.round(v1),   // 最近一周
+    weekMinus2Volume: Math.round(v2),
+    weekMinus3Volume: Math.round(v3),
+    weekMinus4Volume: Math.round(v4),   // 最早一周
+  };
 }
