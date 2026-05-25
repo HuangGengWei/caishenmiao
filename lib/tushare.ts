@@ -1186,7 +1186,8 @@ export async function getWeeklyData(
  * 分析最近4周（包含本周）
  */
 export interface WeeklyVolumePattern {
-  hasPattern: boolean; // 是否符合"放量-缩量-再放量"形态
+  hasPattern: boolean; // 是否符合温和放量形态
+  patternType: "gentle_ramp" | "none"; // 形态类型：温和放量 | 无形态
   patternStrength: number; // 形态强度评分 (0-100)
   description: string; // 形态描述
   weekCount: number; // 分析的周数
@@ -1198,7 +1199,7 @@ export interface WeeklyVolumePattern {
 }
 
 /**
- * 检测周线成交量"放量→缩量→再放量"形态
+ * 检测周线成交量温和放量形态
  * 分析最近4周（包含本周）
  * 形态：W4(放量) → W3(缩量) → W2(缩量) → W1(再放量)
  */
@@ -1209,6 +1210,7 @@ export async function analyzeWeeklyVolumePattern(
   if (!tsCode) {
     return {
       hasPattern: false,
+      patternType: "none",
       patternStrength: 0,
       description: "无法识别股票代码",
       weekCount: 0,
@@ -1233,6 +1235,7 @@ export async function analyzeWeeklyVolumePattern(
   if (!weeklyData || weeklyData.length < 4) {
     return {
       hasPattern: false,
+      patternType: "none",
       patternStrength: 0,
       description: "周线数据不足",
       weekCount: weeklyData?.length || 0,
@@ -1255,6 +1258,7 @@ export async function analyzeWeeklyVolumePattern(
   if (!w1 || !w2 || !w3 || !w4) {
     return {
       hasPattern: false,
+      patternType: "none",
       patternStrength: 0,
       description: "周线数据不足",
       weekCount: weeklyData.length,
@@ -1267,30 +1271,24 @@ export async function analyzeWeeklyVolumePattern(
   }
 
   // 从远到近：W4, W3, W2, W1
-  const v4 = w4.vol || 0; // 最早（放量端1）
-  const v3 = w3.vol || 0; // 缩量
-  const v2 = w2.vol || 0; // 缩量
-  const v1 = w1.vol || 0; // 最近（放量端2，本周）
+  const v4 = w4.vol || 0; // 最早
+  const v3 = w3.vol || 0;
+  const v2 = w2.vol || 0;
+  const v1 = w1.vol || 0; // 最近（本周）
 
-  const weeklyVolumes = [v4, v3, v2, v1]; // 从远到近
+  const weeklyVolumes = [v4, v3, v2, v1];
 
   // ── 主升过滤：排除涨幅过大的股票 ──
-  const p4 = w4.close || 0; // W4 收盘价（最早）
+  const p4 = w4.close || 0;
   const p3 = w3.close || 0;
   const p2 = w2.close || 0;
-  const p1 = w1.close || 0; // W1 收盘价（最近）
+  const p1 = w1.close || 0;
 
-  // 计算各周涨幅
-  const week4Change = p4 > 0 && p3 > 0 ? (p3 - p4) / p4 : 0; // W4 → W3 涨幅
-  const week3Change = p3 > 0 && p2 > 0 ? (p2 - p3) / p3 : 0; // W3 → W2 涨幅
-  const week2Change = p2 > 0 && p1 > 0 ? (p1 - p2) / p2 : 0; // W2 → W1 涨幅
-
-  // 累计涨幅：W4 → W1 的总涨幅
+  const week4Change = p4 > 0 && p3 > 0 ? (p3 - p4) / p4 : 0;
+  const week3Change = p3 > 0 && p2 > 0 ? (p2 - p3) / p3 : 0;
+  const week2Change = p2 > 0 && p1 > 0 ? (p1 - p2) / p2 : 0;
   const totalChange = p4 > 0 && p1 > 0 ? (p1 - p4) / p4 : 0;
 
-  // 过滤条件：
-  // 1. 累计涨幅不超过 25%（排除已走完主升的股票）
-  // 2. 单周涨幅不超过 20%（排除极端波动）
   const MAX_TOTAL_CHANGE = 0.25;
   const MAX_WEEK_CHANGE = 0.20;
   const isReasonableChange = totalChange <= MAX_TOTAL_CHANGE &&
@@ -1298,86 +1296,74 @@ export async function analyzeWeeklyVolumePattern(
     Math.abs(week3Change) <= MAX_WEEK_CHANGE &&
     Math.abs(week2Change) <= MAX_WEEK_CHANGE;
 
-  // ── 核心形态判断 ──
-  const middleAvg = (v2 + v3) / 2; // 中间两周均值
+  // ═══════════════════════════════════════════════════════════
+  // 温和放量（gentle_ramp）：成交量递增，涨幅合理
+  // ═══════════════════════════════════════════════════════════
+  const rampRatio1 = v4 > 0 ? v3 / v4 : 1;
+  const rampRatio2 = v3 > 0 ? v2 / v3 : 1;
+  const rampRatio3 = v2 > 0 ? v1 / v2 : 1;
 
-  // 两端放量程度
-  const leftRatio = middleAvg > 0 ? v4 / middleAvg : 0;   // W-4 相对中间的放量倍数
-  const rightRatio = middleAvg > 0 ? v1 / middleAvg : 0;   // W-1 相对中间的放量倍数
+  const MIN_RAMP = 1.0;
+  const MAX_RAMP = 1.5;
+  const isGentleRamp = 
+    v4 > 0 &&
+    v3 >= v4 * MIN_RAMP && v3 <= v4 * MAX_RAMP &&
+    v2 >= v3 * MIN_RAMP && v2 <= v3 * MAX_RAMP &&
+    v1 >= v2 * MIN_RAMP && v1 <= v2 * MAX_RAMP;
 
-  // 中间缩量确认：W-2 和 W-3 都小于各自相邻的放量端
-  const isMiddleShrunk = v2 < v1 && v2 < v4 && v3 < v1 && v3 < v4;
+  const hasPattern = isGentleRamp && isReasonableChange;
 
-  // 两端接近度：W-1 / W-4 在 [0.7, 1.5] 之间
-  const endRatio = v4 > 0 ? v1 / v4 : 0;
-  const areEndsClose = endRatio >= 0.7 && endRatio <= 1.5;
-
-  // 两端放量阈值：至少 1.3 倍于中间均值
-  const MIN_BURST_RATIO = 1.3;
-  const isLeftBurst = leftRatio >= MIN_BURST_RATIO;
-  const isRightBurst = rightRatio >= MIN_BURST_RATIO;
-
-  // ── 形态成立条件 ──
-  // 需要满足：两端放量 + 中间缩量 + 两端对称 + 涨幅合理
-  const hasPattern = isLeftBurst && isRightBurst && isMiddleShrunk && areEndsClose && isReasonableChange;
-
-  // ── 完美度评分（用于排序）──
-  // 即使不完全符合形态，也计算一个完美度分数，方便排序
+  // 评分
   let patternStrength = 0;
 
-  // 1. 放量程度评分（两端放量倍数，适中为佳）
-  // 最佳放量倍数在 1.5-2.5 之间，过高或过低都扣分
-  const idealBurst = 2.0;
-  const leftBurstScore = Math.max(0, 20 - Math.abs(leftRatio - idealBurst) * 10);
-  const rightBurstScore = Math.max(0, 20 - Math.abs(rightRatio - idealBurst) * 10);
-  patternStrength += leftBurstScore + rightBurstScore;
+  const avgRampRate = (rampRatio1 + rampRatio2 + rampRatio3) / 3;
+  const rampVariance = (
+    Math.abs(rampRatio1 - avgRampRate) +
+    Math.abs(rampRatio2 - avgRampRate) +
+    Math.abs(rampRatio3 - avgRampRate)
+  ) / 3;
+  const stabilityScore = Math.max(0, 30 - rampVariance * 40);
+  patternStrength += stabilityScore;
 
-  // 2. 缩量程度评分（中间两周相对两端越小越好）
-  const shrinkRatio = (v2 + v3) / Math.max(v1 + v4, 1);
-  const shrinkScore = Math.min(30, Math.round((1 - shrinkRatio) * 50));
-  patternStrength += shrinkScore;
+  const idealRampChange = 0.15;
+  const rampChangeScore = Math.max(0, 20 - Math.abs(totalChange - idealRampChange) * 100);
+  patternStrength += rampChangeScore;
 
-  // 3. 对称性评分（W-1 和 W-4 越接近越好）
-  const symmetry = Math.max(0, 1 - Math.abs(endRatio - 1) / 0.5);
-  patternStrength += Math.round(symmetry * 20);
+  const totalRampRatio = v4 > 0 ? v1 / v4 : 1;
+  const totalRampScore = Math.max(0, 20 - Math.abs(totalRampRatio - 2.0) * 10);
+  patternStrength += totalRampScore;
 
-  // 4. 涨幅合理性评分
-  if (isReasonableChange) {
-    patternStrength += 10;
-  }
-
-  // 如果完全符合形态条件，额外加分
-  if (hasPattern) {
-    patternStrength += 20;
-  }
-
+  if (isReasonableChange) patternStrength += 10;
+  if (hasPattern) patternStrength += 20;
   patternStrength = Math.max(0, Math.min(100, patternStrength));
 
-  // ── 描述 ──
-  // 计算缩量程度百分比
-  const shrinkPercent = Math.round((1 - shrinkRatio) * 100);
-  const leftPercent = Math.round((leftRatio - 1) * 100);
-  const rightPercent = Math.round((rightRatio - 1) * 100);
-  
+  // 描述
+  const patternType = hasPattern ? "gentle_ramp" : "none";
   let description = "";
   if (hasPattern) {
-    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}%`;
+    const totalRampPercent = Math.round((totalRampRatio - 1) * 100);
+    const avgRampPercent = Math.round((avgRampRate - 1) * 100);
+    description = `温和放量 | 总增${totalRampPercent}% | 周均增${avgRampPercent}%`;
   } else if (!isReasonableChange) {
-    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}% | 涨幅过大`;
-  } else {
-    // 无论是否符合形态，都显示百分比信息
-    description = `左放+${leftPercent}% | 缩${shrinkPercent}% | 右放+${rightPercent}%`;
+    description = `涨幅过大`;
+  } else if (!isGentleRamp) {
+    // 计算各周量变化百分比
+    const r1p = v4 > 0 ? Math.round((v3 / v4 - 1) * 100) : 0;
+    const r2p = v3 > 0 ? Math.round((v2 / v3 - 1) * 100) : 0;
+    const r3p = v2 > 0 ? Math.round((v1 / v2 - 1) * 100) : 0;
+    description = `量变: ${r1p >= 0 ? "+" : ""}${r1p}% | ${r2p >= 0 ? "+" : ""}${r2p}% | ${r3p >= 0 ? "+" : ""}${r3p}%`;
   }
 
   return {
     hasPattern,
+    patternType,
     patternStrength,
     description,
     weekCount: 4,
     weeklyVolumes,
-    weekMinus1Volume: Math.round(v1),   // 最近一周
+    weekMinus1Volume: Math.round(v1),
     weekMinus2Volume: Math.round(v2),
     weekMinus3Volume: Math.round(v3),
-    weekMinus4Volume: Math.round(v4),   // 最早一周
+    weekMinus4Volume: Math.round(v4),
   };
 }

@@ -46,7 +46,7 @@ type SortKey =
   | "daysSinceLimitUp"
   | "maProximity"
   | "highProximity"
-  | "weeklyVolumePattern";
+  | "gentleWeeklyVolume";
 
 interface DailyChartPoint {
   date: string;
@@ -76,14 +76,15 @@ interface LimitUpInfo {
 
 interface WeeklyVolumePatternInfo {
   hasPattern: boolean;
+  patternType: "gentle_ramp" | "none";
   patternStrength: number;
   description: string;
   weekCount: number;
   weeklyVolumes: number[];
-  weekMinus1Volume: number;  // 前1周（最近的完整周）
-  weekMinus2Volume: number;  // 前2周
-  weekMinus3Volume: number;  // 前3周
-  weekMinus4Volume: number;  // 前4周（最早的完整周）
+  weekMinus1Volume: number;
+  weekMinus2Volume: number;
+  weekMinus3Volume: number;
+  weekMinus4Volume: number;
   loading: boolean;
   error?: string;
 }
@@ -397,6 +398,7 @@ export function StocksPage({ records }: StocksPageProps) {
       ...prev,
       [code]: {
         hasPattern: false,
+        patternType: "none",
         patternStrength: 0,
         description: "",
         weekCount: 0,
@@ -417,6 +419,7 @@ export function StocksPage({ records }: StocksPageProps) {
           ...prev,
           [code]: {
             hasPattern: false,
+            patternType: "none",
             patternStrength: 0,
             description: "",
             weekCount: 0,
@@ -435,6 +438,7 @@ export function StocksPage({ records }: StocksPageProps) {
         ...prev,
         [code]: {
           hasPattern: data.hasPattern ?? false,
+          patternType: data.patternType ?? "none",
           patternStrength: data.patternStrength ?? 0,
           description: data.description ?? "",
           weekCount: data.weekCount ?? 0,
@@ -451,6 +455,7 @@ export function StocksPage({ records }: StocksPageProps) {
         ...prev,
         [code]: {
           hasPattern: false,
+          patternType: "none",
           patternStrength: 0,
           description: "",
           weekCount: 0,
@@ -677,16 +682,16 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = getProximity(b);
           break;
         }
-        case "weeklyVolumePattern": {
-          // 按形态强度排序，强度越高排越前
+        case "gentleWeeklyVolume": {
+          // 按温和放量形态强度排序
           const getPatternStrength = (r: SignalRecord): number => {
             const s = weeklyVolumePatternMap[r.code];
-            if (!s || s.loading || s.error) return -1;
-            return s.hasPattern ? s.patternStrength : -1;
+            if (!s || s.loading || s.error) return -999;
+            if (s.hasPattern) return s.patternStrength;
+            return -100 + (s.patternStrength || 0);
           };
           av = getPatternStrength(a);
           bv = getPatternStrength(b);
-          // 降序排序：强度高的排前面
           if (sortDir === "asc") {
             [av, bv] = [bv, av];
           }
@@ -856,7 +861,7 @@ export function StocksPage({ records }: StocksPageProps) {
   useEffect(() => {
     // 5日线/30日线排序需要全量数据才能正确排序
     const needFullData = sortKey === "maProximity";
-    const needFullWeekly = sortKey === "weeklyVolumePattern";
+    const needFullWeekly = sortKey === "gentleWeeklyVolume";
     const baseCodes = needFullData || needFullWeekly
       ? Array.from(new Set(filtered.map((r) => r.code)))
       : Array.from(new Set(visibleRecords.map((r) => r.code)));
@@ -931,7 +936,7 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
-  /** PE(TTM) 显示，含假设价格 PE 计算小功能 */
+  /** PE(TTM) 显示 */
   function PECell({ code }: { code: string }) {
     const s = stockInfoMap[code];
     if (!s) {
@@ -950,33 +955,10 @@ export function StocksPage({ records }: StocksPageProps) {
     if (s.peTTM == null) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
-    // 获取最新收盘价用于 PE 计算小功能
-    const hpInfo = highProximityMap[code];
-    const latestClose = hpInfo?.latestClose;
-
     return (
-      <div className="flex flex-col gap-0.5 min-w-[80px]" title="修改假设价格计算PE">
-        <span className="font-mono text-xs text-foreground font-semibold">
-          {s.peTTM.toFixed(1)}
-        </span>
-        {latestClose != null && latestClose > 0 && (
-          <input
-            type="number"
-            defaultValue={latestClose.toFixed(2)}
-            className="text-[10px] font-mono bg-secondary border border-border rounded px-1 py-0.5 w-full text-foreground"
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v) && v > 0 && s.peTTM != null) {
-                const ratio = v / latestClose;
-                const newPE = s.peTTM * ratio;
-                e.target.title = `假设价格 ${v.toFixed(2)} → PE ${newPE.toFixed(1)}`;
-              } else {
-                e.target.title = "";
-              }
-            }}
-          />
-        )}
-      </div>
+      <span className="font-mono text-xs text-foreground font-semibold">
+        {s.peTTM.toFixed(1)}
+      </span>
     );
   }
 
@@ -1242,7 +1224,7 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
-  function WeeklyVolumePatternCell({ code }: { code: string }) {
+function WeeklyVolumePatternCell({ code }: { code: string }) {
     const s = weeklyVolumePatternMap[code];
     if (!s) {
       return <span className="text-xs text-muted-foreground">加载中…</span>;
@@ -1263,7 +1245,6 @@ export function StocksPage({ records }: StocksPageProps) {
         </div>
       );
     }
-    // 统一使用 weeklyVolumes 或单独字段渲染柱状图
     const volumes = (s.weeklyVolumes && s.weeklyVolumes.length === 4)
       ? s.weeklyVolumes
       : [s.weekMinus4Volume || 0, s.weekMinus3Volume || 0, s.weekMinus2Volume || 0, s.weekMinus1Volume || 0];
@@ -1273,19 +1254,21 @@ export function StocksPage({ records }: StocksPageProps) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
 
+    const maxVol = Math.max(...volumes, 1);
+
+    // 无形态时：显示淡绿色柱状图
     if (!s.hasPattern) {
-      const maxVol = Math.max(...volumes, 1);
+      const inactiveBarColors = ["bg-emerald-500/25", "bg-emerald-500/35", "bg-emerald-500/45", "bg-emerald-500/55"];
       return (
         <div className="flex flex-col gap-0.5 min-w-[100px]">
           <div className="flex gap-1">
             {volumes.map((vol, i) => {
               const height = (vol / maxVol) * 100;
-              const barColor = i === 0 || i === 3 ? "bg-primary/60" : "bg-muted-foreground/40";
               return (
                 <div key={i} className="flex flex-col items-center gap-0.5">
                   <div className="w-3 h-8 bg-secondary rounded-sm relative overflow-hidden">
                     <div
-                      className={`absolute bottom-0 left-0 right-0 ${barColor} rounded-sm`}
+                      className={`absolute bottom-0 left-0 right-0 ${inactiveBarColors[i]} rounded-sm`}
                       style={{ height: `${height}%` }}
                     />
                   </div>
@@ -1303,37 +1286,35 @@ export function StocksPage({ records }: StocksPageProps) {
       );
     }
 
-    // 有形态时显示
-    const strengthColor = s.patternStrength >= 80 
-      ? "bg-stock-up/20 text-stock-up border-stock-up/40"
+    // 有形态时：显示绿色系高亮
+    const strengthColor = s.patternStrength >= 80
+      ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/40"
       : s.patternStrength >= 60
-      ? "bg-primary/20 text-primary border-primary/40"
-      : "bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/40";
+      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+      : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20";
 
-    const maxVol = Math.max(...volumes, 1);
+    const barColors = ["bg-emerald-500/30", "bg-emerald-500/50", "bg-emerald-500/70", "bg-emerald-500"];
 
     return (
       <div className="flex flex-col gap-0.5 min-w-[100px]">
         <div className="flex items-center gap-1.5">
           <Badge className={`text-[10px] px-1.5 py-0 h-5 w-fit ${strengthColor} font-semibold`}>
-            周线放量
+            温和放量
           </Badge>
           <span className="text-[10px] text-muted-foreground">{s.patternStrength}%</span>
         </div>
         <div className="flex gap-1">
           {volumes.map((vol, i) => {
             const height = (vol / maxVol) * 100;
-            const barColor = i === 0 || i === 3 ? "bg-stock-up/70" : "bg-muted-foreground/30";
-            const label = i === 0 ? "左放" : i === 3 ? "右放" : "缩";
             return (
               <div key={i} className="flex flex-col items-center gap-0.5">
                 <div className="w-3 h-10 bg-secondary rounded-sm relative overflow-hidden">
                   <div
-                    className={`absolute bottom-0 left-0 right-0 ${barColor} rounded-sm transition-all`}
+                    className={`absolute bottom-0 left-0 right-0 ${barColors[i]} rounded-sm transition-all`}
                     style={{ height: `${height}%` }}
                   />
                 </div>
-                <span className="text-[7px] text-muted-foreground">{label}</span>
+                <span className="text-[7px] text-muted-foreground">W{4 - i}</span>
               </div>
             );
           })}
@@ -1569,10 +1550,10 @@ export function StocksPage({ records }: StocksPageProps) {
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
-                    onClick={() => handleSort("weeklyVolumePattern")}
+                    onClick={() => handleSort("gentleWeeklyVolume")}
                   >
-                    周线放量
-                    <SortIcon col="weeklyVolumePattern" />
+                    温和放量
+                    <SortIcon col="gentleWeeklyVolume" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -1580,7 +1561,7 @@ export function StocksPage({ records }: StocksPageProps) {
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={14}
+                      colSpan={13}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
