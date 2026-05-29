@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import {
   Table,
   TableBody,
@@ -13,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Sparkles } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -114,6 +116,7 @@ function xueqiuQuoteUrl(code: string): string {
 }
 
 export function StocksPage({ records }: StocksPageProps) {
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("all");
@@ -179,8 +182,24 @@ export function StocksPage({ records }: StocksPageProps) {
   // 涨停信息（用于计算距上个涨停日天数）：key = code
   const [limitUpMap, setLimitUpMap] = useState<Record<string, LimitUpInfo>>({});
 
-  // 股票信息（含 PE(TTM)、股东人数）：key = code
-  const [stockInfoMap, setStockInfoMap] = useState<Record<string, { peTTM: number | null; holderNum: number | null; loading: boolean; error?: string }>>({});
+  // 股票信息（含 PE(TTM)、股东人数趋势）：key = code
+  const [stockInfoMap, setStockInfoMap] = useState<Record<string, { 
+    peTTM: number | null; 
+    holderNum: number | null; 
+    holderTrend: {
+      periods: Array<{
+        holderNum: number;
+        endDate: string;
+      }>;
+      consecutiveDecrease: number;
+      trendScore: number;
+      totalChangePercent: number | null;
+      avgChangePercent: number | null;
+      description: string;
+    } | null;
+    loading: boolean; 
+    error?: string 
+  }>>({});
 
   // 前高点接近度信息：key = code
   const [highProximityMap, setHighProximityMap] = useState<Record<string, HighProximityInfo>>({});
@@ -350,6 +369,7 @@ export function StocksPage({ records }: StocksPageProps) {
       [code]: {
         peTTM: prev[code]?.peTTM ?? null,
         holderNum: prev[code]?.holderNum ?? null,
+        holderTrend: prev[code]?.holderTrend ?? null,
         loading: true,
         error: undefined,
       },
@@ -366,6 +386,7 @@ export function StocksPage({ records }: StocksPageProps) {
           [code]: {
             peTTM: prev[code]?.peTTM ?? null,
             holderNum: prev[code]?.holderNum ?? null,
+            holderTrend: prev[code]?.holderTrend ?? null,
             loading: false,
             error: data.error || "获取失败",
           },
@@ -377,6 +398,14 @@ export function StocksPage({ records }: StocksPageProps) {
         [code]: {
           peTTM: data.peTTM ?? null,
           holderNum: data.holderNum ?? null,
+          holderTrend: data.holderTrend ? {
+            periods: data.holderTrend.periods || [],
+            consecutiveDecrease: data.holderTrend.consecutiveDecrease,
+            trendScore: data.holderTrend.trendScore,
+            totalChangePercent: data.holderTrend.totalChangePercent,
+            avgChangePercent: data.holderTrend.avgChangePercent,
+            description: data.holderTrend.description,
+          } : null,
           loading: false,
         },
       }));
@@ -386,6 +415,7 @@ export function StocksPage({ records }: StocksPageProps) {
         [code]: {
           peTTM: prev[code]?.peTTM ?? null,
           holderNum: prev[code]?.holderNum ?? null,
+          holderTrend: prev[code]?.holderTrend ?? null,
           loading: false,
           error: e?.message || "网络请求失败",
         },
@@ -627,13 +657,18 @@ export function StocksPage({ records }: StocksPageProps) {
           break;
         }
         case "holderNum": {
-          const getHolderNum = (r: SignalRecord): number | null => {
+          // 按股东人数趋势评分排序：连续降低越多，排序越靠前
+          const getTrendScore = (r: SignalRecord): number => {
             const s = stockInfoMap[r.code];
-            if (!s || s.holderNum == null) return null;
-            return s.holderNum;
+            if (!s || s.loading || !s.holderTrend) return -999;
+            return s.holderTrend.trendScore;
           };
-          av = getHolderNum(a);
-          bv = getHolderNum(b);
+          av = getTrendScore(a);
+          bv = getTrendScore(b);
+          // 趋势评分越高越靠前，所以用降序
+          if (sortDir === "asc") {
+            [av, bv] = [bv, av];
+          }
           break;
         }
         case "daysSinceLimitUp": {
@@ -962,7 +997,7 @@ export function StocksPage({ records }: StocksPageProps) {
     );
   }
 
-  /** 股东人数 */
+  /** 股东人数 - 最新数值 + 季度趋势量柱 */
   function HolderNumCell({ code }: { code: string }) {
     const s = stockInfoMap[code];
     if (!s) {
@@ -971,22 +1006,142 @@ export function StocksPage({ records }: StocksPageProps) {
     if (s.loading) {
       return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
     }
-    if (s.error && s.holderNum == null) {
+    if (s.error && s.holderNum == null && !s.holderTrend) {
       return (
         <span className="text-[10px] text-destructive" title={s.error}>
           查询失败
         </span>
       );
     }
-    if (s.holderNum == null) {
+    if (s.holderNum == null && !s.holderTrend) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
-    // 格式化股东人数：万为单位
-    const holderWan = s.holderNum / 10000;
+    
+    const trend = s.holderTrend;
+    const periods = trend?.periods || [];
+    const consecutiveDecrease = trend?.consecutiveDecrease ?? 0;
+    const latestPeriod = periods[0]; // 最新一期（已按时间倒序）
+    
+    // 格式化股东人数
+    const formatHolderNum = (num: number | null | undefined) => {
+      if (num == null) return "-";
+      if (num >= 10000) {
+        return (num / 10000).toFixed(1) + "万";
+      }
+      return num.toLocaleString();
+    };
+    
+    // 计算最新期相对上期的变化率
+    const latestChange = periods.length >= 2 && periods[0].holderNum > 0 && periods[1].holderNum > 0
+      ? ((periods[0].holderNum - periods[1].holderNum) / periods[1].holderNum) * 100
+      : null;
+    
+    // 需要至少2期数据才显示量柱图
+    const showBars = periods.length >= 2;
+    
+    // 计算每期变化率（从最新往前）
+    const changes: (number | null)[] = [];
+    for (let i = 0; i < periods.length - 1; i++) {
+      const curr = periods[i].holderNum;
+      const prev = periods[i + 1].holderNum;
+      if (curr > 0 && prev > 0) {
+        changes.push(((curr - prev) / prev) * 100);
+      } else {
+        changes.push(null);
+      }
+    }
+    
+    // 获取最大值用于计算量柱高度
+    const maxHolder = Math.max(...periods.map(p => p.holderNum), 1);
+    
+    // 根据连续降低次数决定颜色（5个柱子）
+    const getBarColors = () => {
+      if (consecutiveDecrease >= 3) {
+        return ["bg-emerald-500/20", "bg-emerald-500/40", "bg-emerald-500/55", "bg-emerald-500/70", "bg-emerald-500"];
+      }
+      if (consecutiveDecrease === 2) {
+        return ["bg-emerald-500/20", "bg-emerald-500/35", "bg-emerald-500/50", "bg-emerald-500/65", "bg-emerald-500/80"];
+      }
+      if (consecutiveDecrease === 1) {
+        return ["bg-emerald-500/15", "bg-emerald-500/30", "bg-emerald-500/45", "bg-emerald-500/60", "bg-emerald-500/75"];
+      }
+      return ["bg-blue-500/15", "bg-blue-500/30", "bg-blue-500/45", "bg-blue-500/60", "bg-blue-500/75"];
+    };
+    
+    const barColors = getBarColors();
+    
+    // 格式化变化率
+    const formatChange = (change: number | null) => {
+      if (change === null) return "-";
+      const sign = change < 0 ? "" : "+";
+      return `${sign}${change.toFixed(1)}%`;
+    };
+    
     return (
-      <span className="font-mono text-xs text-foreground">
-        {holderWan >= 1 ? holderWan.toFixed(2) + "万" : s.holderNum.toLocaleString()}
-      </span>
+      <div className="flex flex-col gap-0.5 min-w-[150px]">
+        {/* 最新股东人数 - 核心数值，独立显示 */}
+        <div className="flex items-baseline gap-1.5">
+          <span className="font-mono text-sm text-foreground font-semibold">
+            {formatHolderNum(s.holderNum)}
+          </span>
+          {latestChange !== null && (
+            <span className={`text-[10px] font-mono ${
+              latestChange < 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-500"
+            }`}>
+              {latestChange < 0 ? "" : "+"}{latestChange.toFixed(1)}%
+            </span>
+          )}
+        </div>
+        
+        {/* 连续降低徽章 */}
+        {consecutiveDecrease >= 1 && (
+          <Badge className={`text-[9px] px-1.5 py-0 h-4 font-semibold w-fit ${
+            consecutiveDecrease >= 3 
+              ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/40" 
+              : consecutiveDecrease === 2 
+                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+          }`}>
+            连续{consecutiveDecrease}期↓
+          </Badge>
+        )}
+        
+        {/* 量柱图 - 展示季度变化趋势 */}
+        {showBars && (
+          <div className="flex gap-0.5 items-end mt-1">
+            {periods.slice(0, 5).reverse().map((p, reversedIdx) => {
+              const originalIdx = 4 - reversedIdx;
+              const height = (p.holderNum / maxHolder) * 100;
+              const change = changes[originalIdx];
+              const colorIdx = reversedIdx;
+              
+              return (
+                <div key={reversedIdx} className="flex flex-col items-center gap-0.5">
+                  <div className="w-3 h-10 bg-secondary rounded-sm relative overflow-hidden">
+                    <div
+                      className={`absolute bottom-0 left-0 right-0 ${barColors[colorIdx]} rounded-sm transition-all`}
+                      style={{ height: `${height}%` }}
+                    />
+                  </div>
+                  <span className="text-[7px] font-mono text-muted-foreground">
+                    {formatHolderNum(p.holderNum)}
+                  </span>
+                  <span className="text-[7px] text-muted-foreground/70">
+                    {p.endDate?.slice(5) || `Q${reversedIdx + 1}`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        
+        {/* 最新报告期日期 */}
+        {latestPeriod?.endDate && !showBars && (
+          <span className="text-[10px] text-muted-foreground">
+            {latestPeriod.endDate}
+          </span>
+        )}
+      </div>
     );
   }
 
@@ -1555,13 +1710,16 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                     温和放量
                     <SortIcon col="gentleWeeklyVolume" />
                   </TableHead>
+                  <TableHead className="text-muted-foreground whitespace-nowrap">
+                    AI分析
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={13}
+                      colSpan={14}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
@@ -1653,6 +1811,24 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                         </TableCell>
                         <TableCell>
                           <WeeklyVolumePatternCell code={r.code} />
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs gap-1"
+                            onClick={() => {
+                              const params = new URLSearchParams({
+                                name: r.name,
+                                sector: r.sector.join(","),
+                                concept: (r.concept ?? []).join(","),
+                              });
+                              window.open(`/stock/${r.code}?${params}`, "_blank");
+                            }}
+                          >
+                            <Sparkles className="h-3 w-3 text-amber-500" />
+                            分析
+                          </Button>
                         </TableCell>
                       </TableRow>
                     );

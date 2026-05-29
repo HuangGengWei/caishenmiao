@@ -803,8 +803,158 @@ export async function getDailyBasic(
 }
 
 /**
- * 获取股东人数
- * Tushare 接口: share_number
+ * 单期股东人数数据
+ */
+export interface HolderNumberPeriod {
+  holderNum: number;      // 股东人数
+  endDate: string;        // 报告期 YYYY-MM-DD
+  annDate: string | null; // 公告日期 YYYYMMDD
+}
+
+/**
+ * 股东人数变化趋势分析结果
+ */
+export interface HolderNumberTrend {
+  periods: HolderNumberPeriod[];        // 最近N期数据（按时间倒序：最新在前）
+  consecutiveDecrease: number;          // 连续降低次数（0-3）
+  totalChangePercent: number | null;    // 最新期相比最早期的变化率（负数表示降低）
+  avgChangePercent: number | null;      // 平均每期变化率
+  trendScore: number;                   // 趋势评分（0-100，连续降低越多分越高）
+  latestHolderNum: number | null;       // 最新股东人数
+  description: string;                  // 趋势描述（如：连续3期降低 | 2期降低 | 上升）
+}
+
+/**
+ * 获取股东人数及变化趋势
+ * Tushare 接口: stk_holdernumber
+ * 取该股票最近4期的股东人数，分析变化趋势
+ * @param tsCode 股票代码（如 000001.SZ）
+ * @param periodCount 获取期数，默认4期
+ */
+export async function getShareNumberTrend(
+  tsCode: string,
+  periodCount: number = 5
+): Promise<HolderNumberTrend | null> {
+  try {
+    const rows = await callTushareAPI(
+      "stk_holdernumber",
+      { ts_code: tsCode },
+      ["ts_code", "ann_date", "end_date", "holder_num"]
+    );
+    if (!rows || rows.length === 0) return null;
+
+    // 按 end_date 降序排列，取最近N期
+    const sorted = [...rows].sort((a, b) => {
+      const da = String(a.end_date || "");
+      const db = String(b.end_date || "");
+      return db.localeCompare(da);
+    });
+    
+    const recent = sorted.slice(0, periodCount);
+    if (recent.length === 0) return null;
+
+    // 格式化每期数据
+    const periods: HolderNumberPeriod[] = recent.map(r => {
+      const endDate = String(r.end_date || "");
+      const formattedEndDate = `${endDate.slice(0, 4)}-${endDate.slice(4, 6)}-${endDate.slice(6, 8)}`;
+      return {
+        holderNum: typeof r.holder_num === "number" ? r.holder_num : 0,
+        endDate: formattedEndDate,
+        annDate: r.ann_date ? String(r.ann_date) : null,
+      };
+    });
+
+    // 计算连续降低次数（从最新往前数）
+    let consecutiveDecrease = 0;
+    for (let i = 0; i < periods.length - 1; i++) {
+      const current = periods[i].holderNum;
+      const prev = periods[i + 1].holderNum;
+      if (current > 0 && prev > 0 && current < prev) {
+        consecutiveDecrease++;
+      } else {
+        break; // 遇到非降低即停止
+      }
+    }
+
+    // 计算总变化率和平均变化率
+    let totalChangePercent: number | null = null;
+    let avgChangePercent: number | null = null;
+    
+    if (periods.length >= 2) {
+      const latest = periods[0].holderNum;
+      const earliest = periods[periods.length - 1].holderNum;
+      if (latest > 0 && earliest > 0) {
+        totalChangePercent = ((latest - earliest) / earliest) * 100;
+        
+        // 计算每期变化率的平均值
+        const changes: number[] = [];
+        for (let i = 0; i < periods.length - 1; i++) {
+          const curr = periods[i].holderNum;
+          const prev = periods[i + 1].holderNum;
+          if (curr > 0 && prev > 0) {
+            changes.push(((curr - prev) / prev) * 100);
+          }
+        }
+        if (changes.length > 0) {
+          avgChangePercent = changes.reduce((a, b) => a + b, 0) / changes.length;
+        }
+      }
+    }
+
+    // 计算趋势评分
+    // 连续降低越多，评分越高：连续3期=100分，连续2期=80分，连续1期=60分，无降低=40分，上升=20分
+    let trendScore = 0;
+    if (consecutiveDecrease >= 3) {
+      trendScore = 100;
+    } else if (consecutiveDecrease === 2) {
+      trendScore = 80;
+    } else if (consecutiveDecrease === 1) {
+      trendScore = 60;
+    } else if (totalChangePercent !== null && totalChangePercent < 0) {
+      // 没有连续降低但总体下降
+      trendScore = 40;
+    } else if (totalChangePercent !== null && totalChangePercent > 0) {
+      // 上升
+      trendScore = 20;
+    } else {
+      trendScore = 50; // 无足够数据
+    }
+
+    // 描述
+    let description = "";
+    if (consecutiveDecrease >= 3) {
+      description = `连续${consecutiveDecrease}期降低`;
+      if (totalChangePercent !== null) {
+        description += ` | 累计${totalChangePercent.toFixed(1)}%`;
+      }
+    } else if (consecutiveDecrease >= 1) {
+      description = `连续${consecutiveDecrease}期降低`;
+    } else if (totalChangePercent !== null && totalChangePercent < 0) {
+      description = `下降${Math.abs(totalChangePercent).toFixed(1)}%`;
+    } else if (totalChangePercent !== null && totalChangePercent > 0) {
+      description = `上升${totalChangePercent.toFixed(1)}%`;
+    } else {
+      description = "-";
+    }
+
+    return {
+      periods,
+      consecutiveDecrease,
+      totalChangePercent,
+      avgChangePercent,
+      trendScore,
+      latestHolderNum: periods[0]?.holderNum || null,
+      description,
+    };
+  } catch (e) {
+    console.warn("获取股东人数趋势失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 获取股东人数（单期，兼容旧接口）
+ * Tushare 接口: stk_holdernumber
  * 取该股票最新一期的股东人数
  * @param tsCode 股票代码（如 000001.SZ）
  */
@@ -814,29 +964,13 @@ export async function getShareNumber(
   holderNum: number | null; // 股东人数
   annDate: string | null;   // 公告日期 YYYYMMDD
 } | null> {
-  try {
-    const rows = await callTushareAPI(
-      "stk_holdernumber",
-      { ts_code: tsCode },
-      ["ts_code", "ann_date", "end_date", "holder_num"]
-    );
-    if (!rows || rows.length === 0) return null;
-
-    // 按 end_date 降序排列，取最新一期
-    const sorted = [...rows].sort((a, b) => {
-      const da = String(a.end_date || "");
-      const db = String(b.end_date || "");
-      return db.localeCompare(da);
-    });
-    const latest = sorted[0];
-    return {
-      holderNum: typeof latest.holder_num === "number" ? latest.holder_num : null,
-      annDate: String(latest.ann_date || latest.end_date || ""),
-    };
-  } catch (e) {
-    console.warn("获取 share_number 失败:", e);
-    return null;
-  }
+  const trend = await getShareNumberTrend(tsCode, 1);
+  if (!trend || trend.periods.length === 0) return null;
+  const latest = trend.periods[0];
+  return {
+    holderNum: latest.holderNum || null,
+    annDate: latest.annDate,
+  };
 }
 
 /**
@@ -921,7 +1055,8 @@ export async function getStockInfo(
   amount: number | null;
   debt_ratio: number | null;
   peTTM: number | null;
-  holderNum: number | null; // 股东人数
+  holderNum: number | null; // 股东人数（最新）
+  holderTrend: HolderNumberTrend | null; // 股东人数趋势
 } | null> {
   try {
     const cleanCode = code.replace(/[^\d]/g, "").padStart(6, "0");
@@ -951,6 +1086,7 @@ export async function getStockInfo(
     let debt_ratio: number | null = null;
     let peTTM: number | null = null;
     let holderNum: number | null = null;
+    let holderTrend: HolderNumberTrend | null = null;
     let concepts: string[] = [];
 
     // 顺序获取日线行情、每日指标、财务指标、概念（避免并发触发限频）
@@ -998,14 +1134,15 @@ export async function getStockInfo(
         console.warn("获取概念失败:", e);
       }
 
-      // 股东人数
+      // 股东人数趋势
       try {
-        const share = await getShareNumber(stock.ts_code);
-        if (share) {
-          holderNum = share.holderNum;
+        const trend = await getShareNumberTrend(stock.ts_code);
+        if (trend) {
+          holderTrend = trend;
+          holderNum = trend.latestHolderNum;
         }
       } catch (e) {
-        console.warn("获取股东人数失败:", e);
+        console.warn("获取股东人数趋势失败:", e);
       }
     }
 
@@ -1019,6 +1156,7 @@ export async function getStockInfo(
       debt_ratio,
       peTTM,
       holderNum,
+      holderTrend,
     };
   } catch (error) {
     console.error("获取股票信息失败:", error);
