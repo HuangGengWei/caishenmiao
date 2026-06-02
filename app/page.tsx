@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Landmark } from "lucide-react";
+import { Landmark, TrendingUp } from "lucide-react";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeliveryPanel } from "@/components/delivery-panel";
 import { StocksPage } from "@/components/stocks-page";
@@ -83,6 +85,13 @@ export default function Page() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <Link href="/bloggers">
+              <Button variant="outline" size="sm" className="gap-2">
+                <TrendingUp className="h-4 w-4" />
+                博主分析
+              </Button>
+            </Link>
+            <div className="h-8 w-px bg-border" />
             <div className="text-right">
               <p className="text-xs text-muted-foreground">信号库</p>
               <p className="text-sm font-mono font-bold text-primary">
