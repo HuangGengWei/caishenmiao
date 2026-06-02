@@ -126,6 +126,41 @@ export default function StockAnalysisPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  
+  // 博主分析状态
+  const [bloggerLoading, setBloggerLoading] = useState(false);
+  const [bloggerResult, setBloggerResult] = useState<any>(null);
+
+  // 获取博主视角分析
+  const fetchBloggerAnalysis = async (bloggerName: string) => {
+    if (!result?.stock) return;
+    
+    setBloggerLoading(true);
+    setBloggerResult(null);
+    
+    try {
+      const res = await fetch("/api/ai/stock-blogger-analysis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stock: result.stock,
+          bloggerName
+        }),
+      });
+      
+      const data = await res.json();
+      
+      if (data.error) {
+        console.error("博主分析失败:", data.error);
+      } else {
+        setBloggerResult(data);
+      }
+    } catch (e: any) {
+      console.error("博主分析请求失败:", e);
+    } finally {
+      setBloggerLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!code) {
@@ -607,6 +642,152 @@ export default function StockAnalysisPage() {
                 </CardContent>
               </Card>
             )}
+
+            {/* 博主视角分析 */}
+            <Card className="border-purple-500/30 bg-gradient-to-br from-purple-500/5 to-card">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-purple-500" />
+                  博主视角分析
+                  <Badge variant="outline" className="text-xs border-purple-500/50 text-purple-600">
+                    AI模拟
+                  </Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  选择一位博主，用他的投资理念和交易体系来分析这只股票
+                </p>
+                
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fetchBloggerAnalysis("邻居大爷")}
+                    className="gap-2"
+                  >
+                    <span className="h-6 w-6 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-xs">
+                      邻
+                    </span>
+                    邻居大爷
+                  </Button>
+                  {/* 更多博主可以在这里添加 */}
+                </div>
+                
+                {/* 博主分析结果 */}
+                {bloggerLoading && (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="h-6 w-6 animate-spin text-purple-500" />
+                    <span className="ml-2 text-sm text-muted-foreground">正在用博主视角分析...</span>
+                  </div>
+                )}
+                
+                {bloggerResult?.analysisData && !bloggerLoading && (
+                  <div className="mt-4 space-y-4 border-t border-purple-500/20 pt-4">
+                    {/* 当前阶段 */}
+                    <div className="bg-secondary/50 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium">当前阶段判断</span>
+                        <Badge variant="outline" className="border-purple-500 text-purple-600">
+                          {bloggerResult.analysisData.当前阶段判断 || "分析中"}
+                        </Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {bloggerResult.analysisData.主力意图分析}
+                      </p>
+                    </div>
+                    
+                    {/* 匹配的交易模式 */}
+                    {bloggerResult.analysisData.匹配的交易模式 && (
+                      <div className="bg-purple-500/10 rounded-lg p-4 border border-purple-500/20">
+                        <div className="text-sm font-medium mb-2 flex items-center gap-2">
+                          <Target className="h-4 w-4 text-purple-500" />
+                          匹配的交易模式
+                        </div>
+                        <p className="text-sm">{bloggerResult.analysisData.匹配的交易模式}</p>
+                      </div>
+                    )}
+                    
+                    {/* 关键观察点 */}
+                    {bloggerResult.analysisData.关键观察点?.length > 0 && (
+                      <div>
+                        <div className="text-sm font-medium mb-2">关键观察点</div>
+                        <ul className="space-y-1">
+                          {bloggerResult.analysisData.关键观察点.map((point: string, i: number) => (
+                            <li key={i} className="text-sm flex items-start gap-2">
+                              <span className="text-purple-500 font-bold">•</span>
+                              {point}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    {/* 风险警示 */}
+                    {bloggerResult.analysisData.风险警示?.length > 0 && (
+                      <div className="bg-red-500/10 rounded-lg p-4 border border-red-500/20">
+                        <div className="text-sm font-medium mb-2 flex items-center gap-2 text-red-500">
+                          <AlertTriangle className="h-4 w-4" />
+                          风险警示
+                        </div>
+                        <ul className="space-y-1">
+                          {bloggerResult.analysisData.风险警示.map((risk: string, i: number) => (
+                            <li key={i} className="text-sm text-red-600 dark:text-red-400">
+                              {risk}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    {/* 操作建议 */}
+                    {bloggerResult.analysisData.操作建议 && (
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-secondary/50 rounded-lg p-3 text-center">
+                          <div className="text-xs text-muted-foreground">是否可介入</div>
+                          <div className="text-sm font-medium mt-1">
+                            {bloggerResult.analysisData.操作建议.是否可介入}
+                          </div>
+                        </div>
+                        <div className="bg-secondary/50 rounded-lg p-3 text-center">
+                          <div className="text-xs text-muted-foreground">介入时机</div>
+                          <div className="text-sm font-medium mt-1">
+                            {bloggerResult.analysisData.操作建议.介入时机}
+                          </div>
+                        </div>
+                        <div className="bg-secondary/50 rounded-lg p-3 text-center">
+                          <div className="text-xs text-muted-foreground">仓位建议</div>
+                          <div className="text-sm font-medium mt-1">
+                            {bloggerResult.analysisData.操作建议.仓位建议}
+                          </div>
+                        </div>
+                        <div className="bg-secondary/50 rounded-lg p-3 text-center">
+                          <div className="text-xs text-muted-foreground">止损策略</div>
+                          <div className="text-sm font-medium mt-1">
+                            {bloggerResult.analysisData.操作建议.止损策略}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* 博主点评 */}
+                    {bloggerResult.analysisData.博主点评 && (
+                      <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 rounded-lg p-4 border border-purple-500/30">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="h-8 w-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white text-sm">
+                            {bloggerResult.bloggerName?.charAt(0) || "博"}
+                          </span>
+                          <span className="font-medium">{bloggerResult.bloggerName}点评</span>
+                        </div>
+                        <p className="text-sm italic text-muted-foreground">
+                          "{bloggerResult.analysisData.博主点评}"
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
 
             {/* 原始分析（可折叠） */}
             <details className="group">
