@@ -1004,6 +1004,8 @@ export function StocksPage({ records }: StocksPageProps) {
     requestVersionRef.current += 1;
     // 清空队列
     requestQueueRef.current.queue = [];
+    // 重置处理标志（让新请求可以启动处理）
+    requestQueueRef.current.processing = false;
     // 重置进度
     setQueueTotal(0);
     setQueueCompleted(0);
