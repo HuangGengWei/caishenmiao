@@ -11,48 +11,32 @@ function isDatabaseUnreachable(err: unknown): boolean {
   return /Can't reach database|ECONNREFUSED|P1001|数据库服务器/i.test(msg);
 }
 
-// GET: 获取所有信号记录（支持日期范围筛选）
+// GET: 获取所有信号记录
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const from = searchParams.get("from"); // YYYY-MM-DD
-    const to = searchParams.get("to"); // YYYY-MM-DD
-
-    const where: any = {};
-    if (from || to) {
-      where.date = {};
-      if (from) where.date.gte = new Date(from);
-      if (to) where.date.lte = new Date(to);
-    }
-
-    console.log("GET /api/signals - 查询条件:", where);
-
     const records = await prisma.signalRecord.findMany({
-      where,
       orderBy: { date: "desc" },
     });
 
-    console.log("GET /api/signals - 查询到记录数:", records.length);
-
-    // 转换为前端需要的格式
+    // 转换为前端新格式：stock = code + name, tags = sector + concept
     const formatted: SignalRecord[] = records.map((r) => {
       let reason: string[] = [];
       try {
         reason = JSON.parse(r.reason || "[]");
-        if (!Array.isArray(reason)) {
-          reason = [];
-        }
-      } catch (parseError) {
-        console.warn("解析 reason 字段失败:", r.reason, parseError);
+        if (!Array.isArray(reason)) reason = [];
+      } catch {
         reason = [];
       }
 
+      // 合并 sector 和 concept 为 tags
+      const sectorList = r.sector ? r.sector.split("、").filter(Boolean) : [];
+      const conceptList = r.concept ? r.concept.split("、").filter(Boolean) : [];
+      const tags = [...sectorList, ...conceptList].join(", ");
+
       return {
         date: r.date.toISOString().slice(0, 10),
-        code: r.code,
-        name: r.name,
-        sector: r.sector ? r.sector.split("、").filter(Boolean) : [],
-        concept: r.concept ? r.concept.split("、").filter(Boolean) : [],
+        stock: `${r.code} ${r.name}`,
+        tags,
         sector_pattern:
           (r.sectorPattern === "水下拉水上" || r.sectorPattern === "波动三角收窄"
             ? r.sectorPattern
@@ -69,36 +53,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(formatted);
   } catch (error: any) {
     if (isDatabaseUnreachable(error)) {
-      console.warn(
-        "GET /api/signals: 无法连接数据库（请启动 MySQL 并检查 .env 中 DATABASE_URL）"
-      );
       return NextResponse.json(
-        {
-          error:
-            "无法连接到数据库服务器。请确认 MySQL 已启动（日志中的地址如 localhost:3306），并核对 .env 里的 DATABASE_URL。",
-        },
+        { error: "无法连接到数据库服务器" },
         { status: 503 }
       );
     }
 
     console.error("GET /api/signals error:", error?.message ?? error);
-
-    let errorMessage = error.message || "获取数据失败";
-
-    if (error.code === "P1001") {
-      errorMessage = "无法连接到数据库，请检查数据库配置";
-    } else if (error.code === "P2025") {
-      errorMessage = "记录不存在";
-    } else if (error.code === "P2002") {
-      errorMessage = "数据唯一性冲突";
-    }
-
     return NextResponse.json(
-      {
-        error: errorMessage,
-        details: error.code,
-        meta: error.meta,
-      },
+      { error: error.message || "获取数据失败" },
       { status: 500 }
     );
   }
@@ -115,111 +78,69 @@ export async function POST(req: NextRequest) {
 
     // 验证数据格式
     for (const r of body) {
-      if (!r.date || !r.code || !r.name) {
+      if (!r.stock) {
         return NextResponse.json(
-          { error: `数据格式错误：缺少必要字段 (date, code, name)` },
-          { status: 400 }
-        );
-      }
-      if (!Array.isArray(r.sector)) {
-        return NextResponse.json(
-          { error: `数据格式错误：sector 必须是数组` },
+          { error: "数据格式错误：缺少 stock 字段" },
           { status: 400 }
         );
       }
       if (!Array.isArray(r.reason)) {
         return NextResponse.json(
-          { error: `数据格式错误：reason 必须是数组` },
+          { error: "数据格式错误：reason 必须是数组" },
           { status: 400 }
         );
       }
     }
 
     const data = body.map((r) => {
-      // 验证并转换日期
-      const dateObj = new Date(r.date);
-      if (isNaN(dateObj.getTime())) {
-        throw new Error(`无效的日期格式: ${r.date}`);
+      // 从 stock 字段解析 code 和 name
+      const parts = r.stock.trim().split(/\s+/);
+      const code = parts[0]?.replace(/[^\d]/g, "").padStart(6, "0") || "";
+      const name = parts.slice(1).join(" ").trim() || "";
+
+      if (!code || !name) {
+        throw new Error(`无效的 stock 格式: ${r.stock}`);
       }
 
-      // 确保 score 是整数
+      // 从 tags 字段解析 sector 和 concept
+      const tagsList = (r.tags || "").split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+      // 简单处理：全部作为 sector，concept 为空
+      const sector = tagsList.join("、");
+
       const score = Math.round(Number(r.score)) || 0;
-      if (score < 0 || score > 100) {
-        throw new Error(`score 必须在 0-100 之间，当前值: ${r.score}`);
-      }
-
-      // 确保字符串长度不超过数据库限制
-      const sectorStr = r.sector.join("、");
-      if (sectorStr.length > 255) {
-        throw new Error(`sector 字符串过长 (${sectorStr.length} > 255)`);
-      }
-      const conceptStr = Array.isArray(r.concept) ? r.concept.join("、") : "";
-      if (conceptStr.length > 255) {
-        throw new Error(`concept 字符串过长 (${conceptStr.length} > 255)`);
-      }
-
-      // 验证 code 和 name 不为空
-      if (!r.code || !r.name) {
-        throw new Error(`code 和 name 不能为空`);
-      }
 
       return {
-        date: dateObj,
-        code: r.code.substring(0, 16), // 限制长度
-        name: r.name.substring(0, 64), // 限制长度
-        sector: sectorStr,
-        concept: conceptStr || null,
+        date: r.date ? new Date(r.date) : new Date(), // 使用传入日期或当前日期
+        code: code.substring(0, 16),
+        name: name.substring(0, 64),
+        sector: sector.substring(0, 255) || "未分类",
+        concept: null,
         sectorPattern: r.sector_pattern ? r.sector_pattern.substring(0, 32) : null,
         turnover: r.turnover != null ? Number(r.turnover) : null,
         chg: r.chg != null ? Number(r.chg) : null,
         amount: r.amount != null ? Number(r.amount) : null,
         debtRatio: r.debt_ratio != null ? Number(r.debt_ratio) : null,
-        score: score, // 确保是整数
+        score: score,
         reason: JSON.stringify(r.reason || []),
       };
     });
 
-    // 添加调试日志
     console.log("准备保存数据，记录数:", data.length);
-    console.log("第一条数据示例:", JSON.stringify(data[0], null, 2));
 
     await prisma.signalRecord.createMany({ data });
 
     return NextResponse.json({ success: true, count: data.length });
   } catch (error: any) {
     if (isDatabaseUnreachable(error)) {
-      console.warn(
-        "POST /api/signals: 无法连接数据库（请启动 MySQL 并检查 DATABASE_URL）"
-      );
       return NextResponse.json(
-        {
-          error:
-            "无法连接到数据库服务器，无法保存。请启动 MySQL 并核对 .env 中的 DATABASE_URL。",
-        },
+        { error: "无法连接到数据库服务器" },
         { status: 503 }
       );
     }
 
     console.error("POST /api/signals error:", error?.message ?? error);
-
-    let errorMessage = error.message || "保存数据失败";
-
-    if (error.code === 'P2002') {
-      errorMessage = "数据已存在（唯一约束冲突）";
-    } else if (error.code === 'P2003') {
-      errorMessage = "外键约束失败";
-    } else if (error.code === 'P2011') {
-      errorMessage = "空值违反非空约束";
-    } else if (error.code === 'P2012') {
-      errorMessage = "缺少必需字段";
-    }
-    
     return NextResponse.json(
-      { 
-        error: errorMessage, 
-        details: error.code,
-        meta: error.meta,
-      },
+      { error: error.message || "保存数据失败" },
       { status: 500 }
     );
   }

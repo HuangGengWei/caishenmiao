@@ -5,10 +5,10 @@ const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 function formatStockData(records: any[]): string {
   if (!records || records.length === 0) return "（当日无个股数据）";
   return records
-    .map(
-      (r) =>
-        `- ${r.code} ${r.name} | 板块: ${(r.sector || []).join("、")} | 概念: ${(r.concept || []).join("、") || "-"} | 换手${r.turnover ?? "-"}% | 市值${r.amount ?? "-"}亿 | 负债率${r.debt_ratio ?? "-"}%`
-    )
+    .map((r) => {
+      const tags = (r.tags || "").split(/[,，]/).map((t: string) => t.trim()).filter(Boolean);
+      return `- ${r.stock} | 标签: ${tags.join("、") || "-"} | 换手${r.turnover ?? "-"}% | 市值${r.amount ?? "-"}亿 | 负债率${r.debt_ratio ?? "-"}%`;
+    })
     .join("\n");
 }
 
@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
     }
 
     const stockText = formatStockData(records);
-    const sectorList = [...new Set(records.flatMap((r: any) => r.sector || []))].join("、");
+    const sectorList = [...new Set(records.flatMap((r: any) => (r.tags || "").split(/[,，]/).map((t: string) => t.trim()).filter(Boolean)))].join("、");
 
     const systemPrompt = `你是A股日内复盘顾问。根据用户提供的当日板块分时图与个股数据，输出可执行的次日操作建议。
 

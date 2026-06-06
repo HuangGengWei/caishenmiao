@@ -22,11 +22,14 @@ export function ScoreChart({ records }: ScoreChartProps) {
 
   const sorted = [...records].sort((a, b) => b.score - a.score).slice(0, 15);
 
-  const data = sorted.map((r) => ({
-    name: r.name || r.code,
-    score: r.score,
-    code: r.code,
-  }));
+  const data = sorted.map((r) => {
+    const [code, ...nameParts] = r.stock.split(/\s+/);
+    return {
+      name: nameParts.join(" ") || code,
+      score: r.score,
+      code,
+    };
+  });
 
   function getBarColor(score: number) {
     if (score >= 75) return "hsl(145, 65%, 38%)";

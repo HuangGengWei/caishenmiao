@@ -9,8 +9,7 @@ import { calculateScore } from "./scoring";
  * 3. JSON arrays
  */
 export function parseSignalText(
-  text: string,
-  defaultDate?: string
+  text: string
 ): SignalRecord[] {
   const trimmed = text.trim();
 
@@ -19,7 +18,7 @@ export function parseSignalText(
     try {
       const arr = JSON.parse(trimmed);
       return arr.map((item: Record<string, unknown>) =>
-        normalizeRecord(item, defaultDate)
+        normalizeRecord(item)
       );
     } catch {
       // Fall through to text parsing
@@ -86,8 +85,8 @@ export function parseSignalText(
       raw.chg = extractChg(parts);
     }
 
-    const record = normalizeRecord(raw, defaultDate);
-    if (record.code || record.name) {
+    const record = normalizeRecord(raw);
+    if (record.stock) {
       records.push(record);
     }
   }
@@ -108,8 +107,8 @@ export function parseSignalText(
       }
 
       if (Object.keys(raw).length > 0) {
-        const record = normalizeRecord(raw, defaultDate);
-        if (record.code || record.name) {
+        const record = normalizeRecord(raw);
+        if (record.stock) {
           records.push(record);
         }
       }
@@ -122,8 +121,6 @@ export function parseSignalText(
 function mapHeaderToKey(header: string): string | null {
   const h = header.toLowerCase().trim();
   const map: Record<string, string> = {
-    日期: "date",
-    date: "date",
     代码: "code",
     股票代码: "code",
     code: "code",
@@ -169,32 +166,33 @@ function parseSectorPattern(
 }
 
 function normalizeRecord(
-  raw: Record<string, unknown>,
-  defaultDate?: string
+  raw: Record<string, unknown>
 ): SignalRecord {
-  const date =
-    (raw.date as string) || defaultDate || new Date().toISOString().slice(0, 10);
   const code = normalizeCode(raw.code as string);
   const name = ((raw.name as string) || "").trim();
+  // 合并代码和名称为 stock 字段
+  const stock = code && name ? `${code} ${name}` : (code || name || "");
 
-  let sector: string[] = [];
+  // 合并板块和概念为 tags 字段（逗号分隔）
+  let sectorParts: string[] = [];
   if (typeof raw.sector === "string") {
-    sector = (raw.sector as string)
+    sectorParts = (raw.sector as string)
       .split(/[,，、]/)
       .map((s) => s.trim())
       .filter(Boolean);
   } else if (Array.isArray(raw.sector)) {
-    sector = raw.sector as string[];
+    sectorParts = raw.sector as string[];
   }
-  let concept: string[] = [];
+  let conceptParts: string[] = [];
   if (typeof raw.concept === "string") {
-    concept = (raw.concept as string)
+    conceptParts = (raw.concept as string)
       .split(/[,，、]/)
       .map((s) => s.trim())
       .filter(Boolean);
   } else if (Array.isArray(raw.concept)) {
-    concept = raw.concept as string[];
+    conceptParts = raw.concept as string[];
   }
+  const tags = [...sectorParts, ...conceptParts].join(", ");
 
   const sectorPattern = parseSectorPattern(raw.sector_pattern);
   const turnover =
@@ -210,11 +208,9 @@ function normalizeRecord(
   const { score, reason } = calculateScore(partial);
 
   return {
-    date,
-    code,
-    name,
-    sector,
-    concept,
+    date: new Date().toISOString().slice(0, 10), // 默认使用当前日期
+    stock,
+    tags,
     sector_pattern: sectorPattern,
     turnover,
     chg,

@@ -432,6 +432,36 @@ export async function getLastLimitUpDate(code: string): Promise<string | null> {
 }
 
 /**
+ * 获取股票最近一个跌停日
+ * @param code 6位股票代码
+ * @returns 最近跌停日 YYYY-MM-DD，若无则返回 null
+ */
+export async function getLastLimitDownDate(code: string): Promise<string | null> {
+  const tsCode = codeToTsCode(code);
+  if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
+
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(start.getDate() - 180); // 查找近180个自然日
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const rows = await getDailyRange(tsCode, fmt(start), fmt(today));
+  if (!rows || rows.length === 0) return null;
+
+  const THRESHOLD = -9.8;
+  // 按日期降序，找到最近的跌停日
+  const sorted = [...rows].sort((a, b) => b.trade_date.localeCompare(a.trade_date));
+  for (const r of sorted) {
+    if (typeof r.pct_chg === "number" && r.pct_chg <= THRESHOLD) {
+      const td = r.trade_date;
+      return `${td.slice(0, 4)}-${td.slice(4, 6)}-${td.slice(6, 8)}`;
+    }
+  }
+  return null;
+}
+
+/**
  * 获取股票20日均线及最新价格信息
  * 逻辑：取最近 ~30 个交易日的日线数据，取最新20条计算 MA20，
  * 并判断最新交易日的收盘价/最高价是否达到或穿越 MA20。
@@ -675,11 +705,15 @@ export async function getMA5MA30(code: string): Promise<{
 
 export type DailyChartPoint = {
   date: string; // YYYY-MM-DD
-  close: number;
+  open: number; // 开盘价
+  high: number; // 最高价
+  low: number;  // 最低价
+  close: number; // 收盘价
   ma5: number | null;
   ma30: number | null;
   vol5: number | null;  // 5日成交量均线（手）
   v10: number | null; // 10日成交量均线（手）
+  pct_chg: number | null; // 涨跌幅 %
 };
 
 /**
@@ -729,7 +763,18 @@ export async function getDailyChartData(code: string): Promise<{
     const v10 = slice10.length >= 10
       ? Math.round(slice10.reduce((s, r) => s + (r.vol || 0), 0) / 10)
       : null;
-    series.push({ date, close: Math.round(close * 100) / 100, ma5, ma30, vol5, v10 });
+    series.push({ 
+      date, 
+      open: Math.round(use[k].open * 100) / 100,
+      high: Math.round(use[k].high * 100) / 100,
+      low: Math.round(use[k].low * 100) / 100,
+      close: Math.round(close * 100) / 100, 
+      ma5, 
+      ma30, 
+      vol5, 
+      v10, 
+      pct_chg: use[k].pct_chg 
+    });
   }
 
   const ma5Latest = use.slice(0, 5).reduce((s, r) => s + r.close, 0) / 5;
@@ -744,8 +789,9 @@ export async function getDailyChartData(code: string): Promise<{
   const typicalNearMa30 =
     minTypical > 0 && Math.abs(typicalPrice - ma30Latest) / minTypical < MA5_MA30_NEAR_THRESHOLD;
 
-  // 计算上次 MA5 与 MA30 交叉的日期（从最新往前找）
+  // 计算上次 MA5 与 MA30 交叉的日期和方向（从最新往前找）
   let lastCrossDate: string | null = null;
+  let lastCrossDirection: "up" | "down" | null = null; // up=金叉(MA5上穿MA30), down=死叉(MA5下穿MA30)
   for (let i = 0; i < series.length - 1; i++) {
     const curr = series[i];
     const prev = series[i + 1];
@@ -755,6 +801,8 @@ export async function getDailyChartData(code: string): Promise<{
       // 交叉：当前和之前的差值符号不同，或任一为0（重合）
       if (currDiff * prevDiff < 0 || currDiff === 0) {
         lastCrossDate = curr.date;
+        // 判断方向：prevDiff < 0 表示之前 MA5 < MA30，现在 >= 表示向上交叉（金叉）
+        lastCrossDirection = prevDiff < 0 ? "up" : "down";
         break;
       }
     }
@@ -766,7 +814,7 @@ export async function getDailyChartData(code: string): Promise<{
   const minVol = Math.min(vol5Latest, v10Latest);
   const volNear = minVol > 0 && Math.abs(vol5Latest - v10Latest) / minVol < MA5_MA30_NEAR_THRESHOLD;
 
-  return { series, near, typicalNearMa30, lastCrossDate, volNear };
+  return { series, near, typicalNearMa30, lastCrossDate, lastCrossDirection, volNear };
 }
 
 /**
@@ -1170,8 +1218,8 @@ export async function getStockInfo(
 export type HighPoint = {
   price: number;           // 高点价格
   date: string;            // 高点日期 YYYY-MM-DD
-  proximityPercent: number; // 目标价距离该高点的百分比
-  aboveOrBelow: "above" | "below" | "equal"; // 目标价与该高点关系
+  proximityPercent: number; // 收盘价相对于该高点的百分比（正=突破，负=假摔）
+  aboveOrBelow: "above" | "below" | "equal"; // 收盘价与该高点关系
 };
 
 /**
@@ -1186,8 +1234,8 @@ export async function getHighProximity(
   highPoints: HighPoint[];       // 多个前高点（按价格降序）
   latestClose: number;           // 最新收盘价
   latestTradeDate: string;       // 最新交易日 YYYY-MM-DD
-  targetPrice: number;           // 最新收盘价 + 10%
-  nearestHighIndex: number;      // 距离目标价最近的高点索引（-1表示无）
+  targetPrice: number;           // 最新收盘价 + 10%（参考）
+  nearestHighIndex: number;      // 最接近收盘价的高点索引（-1表示无）
 } | null> {
   const tsCode = codeToTsCode(code);
   if (!tsCode) throw new Error(`无法识别股票代码 ${code}`);
@@ -1211,31 +1259,98 @@ export async function getHighProximity(
   const formatDate = (ymd: string) =>
     `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
 
-  // 找出多个前高点：按最高价降序，每个高点之间需间隔至少 MIN_GAP_DAYS 个交易日
-  const MIN_GAP_DAYS = 20; // 高点之间最小间隔天数
-  const highPointsRaw: { price: number; date: string; index: number }[] = [];
+  // 筹码集中度检测：找出成交量最密集的价格区间
+  // 分析最近60个交易日的量价分布
+  const ANALYSIS_DAYS = 60;
+  const analysisData = sorted.slice(-ANALYSIS_DAYS);
+  
+  if (analysisData.length < 20) {
+    return null;
+  }
 
-  // 收集所有高点候选（按价格降序）
-  const candidates = sorted
-    .map((r, idx) => ({ price: r.high, date: r.trade_date, index: idx }))
-    .filter(r => typeof r.price === "number" && r.price > 0)
-    .sort((a, b) => b.price - a.price);
+  // 找出价格范围，分成若干档位
+  const allHighs = analysisData.map(d => d.high).filter(v => typeof v === 'number' && v > 0);
+  const allLows = analysisData.map(d => d.low).filter(v => typeof v === 'number' && v > 0);
+  const priceMax = Math.max(...allHighs);
+  const priceMin = Math.min(...allLows);
+  const priceRange = priceMax - priceMin;
+  
+  // 分成20档，每档约5%的价格区间
+  const NUM_BUCKETS = 20;
+  const bucketSize = priceRange / NUM_BUCKETS;
+  
+  // 统计每个价格档位的成交量
+  const volumeByBucket: { volume: number; highPrice: number; lowPrice: number; days: number; lastDate: string }[] = [];
+  
+  for (let b = 0; b < NUM_BUCKETS; b++) {
+    const lowPrice = priceMin + b * bucketSize;
+    const highPrice = priceMin + (b + 1) * bucketSize;
+    let totalVolume = 0;
+    let days = 0;
+    let lastDate = '';
+    
+    for (const d of analysisData) {
+      // 如果当日价格区间与此档位有重叠
+      if (typeof d.high === 'number' && typeof d.low === 'number' && d.high >= lowPrice && d.low <= highPrice) {
+        totalVolume += d.vol || 0;
+        days++;
+        if (d.trade_date > lastDate) lastDate = d.trade_date;
+      }
+    }
+    
+    volumeByBucket.push({
+      volume: totalVolume,
+      highPrice,
+      lowPrice,
+      days,
+      lastDate,
+    });
+  }
+  
+  // 按成交量降序，找出筹码最集中的3个档位
+  volumeByBucket.sort((a, b) => b.volume - a.volume);
+  const topBuckets = volumeByBucket.slice(0, 3);
+  
+  // 将筹码集中区转换为前高点
+  const highPointsRaw: { price: number; date: string; index: number; amplitude: number }[] = [];
+  
+  for (const bucket of topBuckets) {
+    if (bucket.volume > 0 && bucket.days >= 5) {
+      // 筹码集中区的上沿作为"前高"
+      highPointsRaw.push({
+        price: Math.round(bucket.highPrice * 100) / 100,
+        date: bucket.lastDate,
+        index: 0,
+        amplitude: Math.round(((bucket.highPrice - bucket.lowPrice) / bucket.highPrice) * 100 * 100) / 100,
+      });
+    }
+  }
 
-  // 选出间隔足够的前高点（最多3个）
-  for (const c of candidates) {
-    // 检查是否与已选高点间隔足够
-    const hasNearby = highPointsRaw.some(h => 
-      Math.abs(h.index - c.index) < MIN_GAP_DAYS
-    );
-    if (!hasNearby) {
-      highPointsRaw.push(c);
-      if (highPointsRaw.length >= 3) break;
+  // 如果筹码分析失败，回退到前高点检测
+  if (highPointsRaw.length === 0) {
+    const MIN_GAP_DAYS = 20;
+    const candidates = sorted
+      .map((r, idx) => ({ price: r.high, date: r.trade_date, index: idx }))
+      .filter(r => typeof r.price === "number" && r.price > 0)
+      .sort((a, b) => b.price - a.price);
+
+    for (const c of candidates) {
+      const hasNearby = highPointsRaw.some(h => 
+        Math.abs(h.index - c.index) < MIN_GAP_DAYS
+      );
+      if (!hasNearby) {
+        highPointsRaw.push({ price: c.price, date: c.date, index: c.index, amplitude: 0 });
+        if (highPointsRaw.length >= 3) break;
+      }
     }
   }
 
   if (highPointsRaw.length === 0) {
     return null;
   }
+
+  // 按价格降序（最高的前高在前）
+  highPointsRaw.sort((a, b) => b.price - a.price);
 
   // 最新收盘价（最后一条记录）
   const latest = sorted[sorted.length - 1];
@@ -1249,10 +1364,11 @@ export async function getHighProximity(
   // 目标价 = 最新收盘价 + 10%
   const targetPrice = latestClose * 1.10;
 
-  // 计算每个高点与目标价的关系
+  // 计算每个高点与收盘价的关系
+  // proximityPercent: 正值表示收盘价突破该高点，负值表示在该高点下方
   const highPoints: HighPoint[] = highPointsRaw.map(h => {
-    const diff = targetPrice - h.price;
-    const proximityPercent = Math.abs(diff) / h.price * 100;
+    const diff = latestClose - h.price;
+    const proximityPercent = (diff / h.price) * 100; // 正=突破，负=假摔
     let aboveOrBelow: "above" | "below" | "equal";
     if (Math.abs(diff) < 0.01) {
       aboveOrBelow = "equal";
@@ -1269,15 +1385,8 @@ export async function getHighProximity(
     };
   });
 
-  // 找距离目标价最近的高点
-  let nearestHighIndex = -1;
-  let minProximity = Infinity;
-  for (let i = 0; i < highPoints.length; i++) {
-    if (highPoints[i].proximityPercent < minProximity) {
-      minProximity = highPoints[i].proximityPercent;
-      nearestHighIndex = i;
-    }
-  }
+  // 最近日期的平台是第一个（索引0），作为主要参考
+  const nearestHighIndex = 0;
 
   return {
     highPoints,

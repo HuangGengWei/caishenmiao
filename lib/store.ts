@@ -61,30 +61,13 @@ export async function clearAllRecords(): Promise<void> {
     if (!res.ok) throw new Error("清空数据失败");
   } catch (error) {
     console.error("clearAllRecords error:", error);
-}
-}
-
-// 按日期获取记录
-export async function getRecordsByDate(
-  date: string
-): Promise<SignalRecord[]> {
-  const all = await getAllRecords();
-  return all.filter((r) => r.date === date);
-}
-
-// 获取近30天记录
-export async function getLast30DaysRecords(): Promise<SignalRecord[]> {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-  const all = await getAllRecords();
-  return all.filter((r) => r.date >= cutoffStr);
+  }
 }
 
 // ================= 统计与导出（保持同步，基于内存数据）=================
 
 export function getDailySummary(records: SignalRecord[]): DailySummary {
-  const date = records[0]?.date || new Date().toISOString().slice(0, 10);
+  const date = new Date().toISOString().slice(0, 10);
   return {
     date,
     totalCount: records.length,
@@ -96,23 +79,24 @@ export function getDailySummary(records: SignalRecord[]): DailySummary {
 }
 
 export function getSectorStats(records: SignalRecord[]): SectorStat[] {
-  const sectorMap = new Map<string, { dates: Set<string>; records: SignalRecord[] }>();
+  const sectorMap = new Map<string, { count: number; records: SignalRecord[] }>();
 
   for (const r of records) {
-    for (const s of r.sector) {
+    const tags = (r.tags || "").split(/,\s*/).filter(Boolean);
+    for (const s of tags) {
       if (!sectorMap.has(s)) {
-        sectorMap.set(s, { dates: new Set(), records: [] });
+        sectorMap.set(s, { count: 0, records: [] });
       }
       const entry = sectorMap.get(s)!;
-      entry.dates.add(r.date);
+      entry.count++;
       entry.records.push(r);
     }
   }
 
   return Array.from(sectorMap.entries())
-    .map(([sector, { dates, records: recs }]) => ({
+    .map(([sector, { count, records: recs }]) => ({
       sector,
-      count: dates.size, // 统计板块出现的日期次数，而不是个股数量
+      count,
       topRecords: recs.sort((a, b) => b.score - a.score).slice(0, 3),
       avgScore: Math.round(recs.reduce((s, r) => s + r.score, 0) / recs.length),
     }))
@@ -123,10 +107,9 @@ export function getStockHistory(records: SignalRecord[]): StockHistory[] {
   const stockMap = new Map<string, SignalRecord[]>();
 
   for (const r of records) {
-    const key = r.code || r.name;
-    if (!key) continue;
-    if (!stockMap.has(key)) stockMap.set(key, []);
-    stockMap.get(key)!.push(r);
+    if (!r.stock) continue;
+    if (!stockMap.has(r.stock)) stockMap.set(r.stock, []);
+    stockMap.get(r.stock)!.push(r);
   }
 
   return Array.from(stockMap.entries())
@@ -135,14 +118,12 @@ export function getStockHistory(records: SignalRecord[]): StockHistory[] {
         .map((r) => r.turnover)
         .filter((t): t is number => t !== null);
       const scores = recs.map((r) => r.score);
-      const allSectors = new Set(recs.flatMap((r) => r.sector));
+      const allTags = new Set(recs.flatMap((r) => (r.tags || "").split(/,\s*/).filter(Boolean)));
 
       return {
-        code: recs[0].code,
-        name: recs[0].name,
-        sectors: Array.from(allSectors),
+        stock: recs[0].stock,
+        tags: Array.from(allTags),
         appearances: recs.length,
-        dates: [...new Set(recs.map((r) => r.date))].sort(),
         avgTurnover:
           turnovers.length > 0
             ? Math.round(
@@ -159,11 +140,8 @@ export function getStockHistory(records: SignalRecord[]): StockHistory[] {
 
 export function exportToCSV(records: SignalRecord[]): string {
   const headers = [
-    "日期",
-    "代码",
-    "名称",
-    "板块",
-    "概念",
+    "股票",
+    "标签",
     "换手率%",
     "市值",
     "资产负债率%",
@@ -171,11 +149,8 @@ export function exportToCSV(records: SignalRecord[]): string {
     "评分原因",
   ];
   const rows = records.map((r) => [
-    r.date,
-    r.code,
-    r.name,
-    r.sector.join("、"),
-    (r.concept ?? []).join("、"),
+    r.stock,
+    r.tags,
     r.turnover ?? "",
     r.amount ?? "",
     r.debt_ratio ?? "",

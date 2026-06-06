@@ -41,9 +41,12 @@ export function SectorPanel({ sectors }: SectorPanelProps) {
                 </div>
               </div>
               <div className="flex flex-col gap-1.5">
-                {s.topRecords.map((r, i) => (
+                {s.topRecords.map((r, i) => {
+                    const [code, ...nameParts] = r.stock.split(/\s+/);
+                    const name = nameParts.join(" ");
+                    return (
                   <div
-                    key={`${r.code}-${i}`}
+                    key={`${r.stock}-${i}`}
                     className="flex items-center justify-between text-xs"
                   >
                     <div className="flex items-center gap-2">
@@ -51,9 +54,9 @@ export function SectorPanel({ sectors }: SectorPanelProps) {
                         {i + 1}.
                       </span>
                       <span className="font-mono text-foreground">
-                        {r.code}
+                        {code}
                       </span>
-                      <span className="text-foreground">{r.name}</span>
+                      <span className="text-foreground">{name}</span>
                     </div>
                     <span
                       className={`font-mono font-bold ${
@@ -67,7 +70,8 @@ export function SectorPanel({ sectors }: SectorPanelProps) {
                       {r.score}
                     </span>
                   </div>
-                ))}
+                    );
+                  })}
               </div>
             </div>
           ))}

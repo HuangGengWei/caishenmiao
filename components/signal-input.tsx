@@ -15,18 +15,16 @@ import type { SignalRecord } from "@/lib/types";
 
 interface SignalInputProps {
   onParsed: (records: SignalRecord[]) => void | Promise<void>;
-  fixedDate?: string; // 如果提供，则锁定为该日期并隐藏头部日期选择
-  onSubmitted?: () => void; // 成功提交后回调（例如关闭弹窗）
-  existingSectors?: string[]; // 历史录入过的板块选项，用于下拉建议
-  onDirtyChange?: (dirty: boolean) => void; // 表单是否有未保存修改
+  onSubmitted?: () => void;
+  existingSectors?: string[];
+  onDirtyChange?: (dirty: boolean) => void;
+  fixedDate?: string; // YYYY-MM-DD，日历双击时固定日期
 }
 
 interface RowData {
   id: string;
-  code: string;
-  name: string;
-  sector: string;
-  concept: string;
+  stock: string; // 格式: "代码 名称"
+  tags: string; // 逗号分隔
   turnover: string;
   amount: string;
   debt_ratio: string;
@@ -35,10 +33,8 @@ interface RowData {
 function createEmptyRow(): RowData {
   return {
     id: crypto.randomUUID(),
-    code: "",
-    name: "",
-    sector: "",
-    concept: "",
+    stock: "",
+    tags: "",
     turnover: "",
     amount: "",
     debt_ratio: "",
@@ -46,36 +42,29 @@ function createEmptyRow(): RowData {
 }
 
 function rowToRecord(row: RowData, date: string): SignalRecord | null {
-  if (!row.code && !row.name) return null;
+  if (!row.stock) return null;
 
   const turnover = row.turnover ? parseFloat(row.turnover) : null;
   const amount = row.amount ? parseFloat(row.amount) : null;
   const debt_ratio = row.debt_ratio ? parseFloat(row.debt_ratio) : null;
-  const sectors = row.sector
-    .split(/[,，、]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const concepts = row.concept
-    .split(/[,，、]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  // 确保所有字段都是有效的
-  const code = row.code.replace(/[^\d]/g, "").padStart(6, "0");
-  const name = row.name.trim();
+  
+  // 从 stock 字段解析代码和名称
+  const parts = row.stock.trim().split(/\s+/);
+  if (parts.length < 2) {
+    return null;
+  }
+  
+  const code = parts[0].replace(/[^\d]/g, "").padStart(6, "0");
+  const name = parts.slice(1).join(" ").trim();
   
   if (!code || !name) {
-    console.error("Invalid record: missing code or name", { code, name });
     return null;
   }
 
   return {
     date,
-    code,
-    name,
-    sector: sectors.length > 0 ? sectors : ["未分类"], // 确保 sector 不为空数组
-    concept: concepts,
+    stock: `${code} ${name}`,
+    tags: row.tags.trim() || "未分类",
     sector_pattern: null,
     turnover: turnover != null && !isNaN(turnover) ? turnover : null,
     chg: null,
@@ -88,38 +77,28 @@ function rowToRecord(row: RowData, date: string): SignalRecord | null {
 
 export function SignalInput({
   onParsed,
-  fixedDate,
   onSubmitted,
-  existingSectors = [],
   onDirtyChange,
+  fixedDate,
 }: SignalInputProps) {
-  const [date, setDate] = useState(
-    () => fixedDate || new Date().toISOString().slice(0, 10)
-  );
   const [rows, setRows] = useState<RowData[]>(() =>
     Array.from({ length: 1 }, createEmptyRow)
   );
   const [error, setError] = useState<string | null>(null);
   const [loadingCodes, setLoadingCodes] = useState<Set<string>>(new Set());
   const codeTimeoutRefs = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const initialDateRef = useRef(date);
   const dirtyRef = useRef(false);
 
-  // 根据股票代码自动填充信息
   const fetchStockInfo = useCallback(
     async (rowId: string, code: string) => {
       const cleanCode = code.replace(/[^\d]/g, "").padStart(6, "0");
-      if (cleanCode.length !== 6) {
-        return;
-      }
+      if (cleanCode.length !== 6) return;
 
       setLoadingCodes((prev) => new Set(prev).add(rowId));
 
       try {
-        // 转换日期格式：YYYY-MM-DD -> YYYYMMDD
-        const tradeDate = date.replace(/-/g, "");
         const response = await fetch(
-          `/api/tushare/stock-info?code=${cleanCode}&tradeDate=${tradeDate}`
+          `/api/tushare/stock-info?code=${cleanCode}`
         );
 
         if (response.ok) {
@@ -127,30 +106,26 @@ export function SignalInput({
           setRows((prev) =>
             prev.map((r) => {
               if (r.id !== rowId) return r;
-              // 只填充空字段，不覆盖已有数据
-              const updated = {
+              const name = info.name || "";
+              const stock = name ? `${cleanCode} ${name}` : r.stock;
+              const tags = [
+                info.industry || "",
+                ...(info.concept || [])
+              ].filter(Boolean).join(", ") || r.tags;
+              
+              return {
                 ...r,
-                name: r.name || info.name || "",
+                stock,
+                tags,
                 turnover: r.turnover || (info.turnover != null ? info.turnover.toFixed(2) : "") || "",
                 amount: r.amount || (info.amount != null ? info.amount.toFixed(2) : "") || "",
                 debt_ratio: r.debt_ratio || (info.debt_ratio != null ? info.debt_ratio.toFixed(2) : "") || "",
-                sector: r.sector || (info.industry ? String(info.industry) : r.sector),
-                concept: r.concept || (info.concept && info.concept.length > 0 ? info.concept.join("、") : r.concept),
               };
-              
-              return updated;
             })
           );
-          // 清除之前的错误提示
           setError(null);
         } else {
-          const errorData = await response.json();
-          // 如果股票代码不存在，提示用户手动填写
-          if (response.status === 404) {
-            setError(`股票代码 ${cleanCode} 未找到，请检查代码是否正确或手动填写信息`);
-          } else {
-            setError(errorData.error || "获取股票信息失败，请手动填写");
-          }
+          setError(`股票代码 ${cleanCode} 未找到，请手动填写信息`);
         }
       } catch (err) {
         console.error("获取股票信息失败:", err);
@@ -163,29 +138,23 @@ export function SignalInput({
         });
       }
     },
-    [date]
+    []
   );
 
   const updateRow = useCallback(
-    (id: string, field: keyof RowData, value: string | boolean) => {
+    (id: string, field: keyof RowData, value: string) => {
       setRows((prev) =>
         prev.map((r) => {
           if (r.id !== id) return r;
           const updated = { ...r, [field]: value };
           
-          // 当代码字段更新时，延迟查询股票信息
-          if (field === "code" && typeof value === "string") {
-            // 清除之前的定时器
+          if (field === "stock" && value.trim().length >= 6) {
             const existingTimeout = codeTimeoutRefs.current.get(id);
-            if (existingTimeout) {
-              clearTimeout(existingTimeout);
-            }
+            if (existingTimeout) clearTimeout(existingTimeout);
             
-            // 设置新的定时器（防抖：500ms）
             const timeout = setTimeout(() => {
-              if (value.trim().length >= 6) {
-                fetchStockInfo(id, value);
-              }
+              const code = value.trim().split(/\s+/)[0] || "";
+              if (code.length >= 6) fetchStockInfo(id, code);
               codeTimeoutRefs.current.delete(id);
             }, 500);
             
@@ -199,7 +168,6 @@ export function SignalInput({
     [fetchStockInfo]
   );
 
-  // 清理定时器
   useEffect(() => {
     return () => {
       codeTimeoutRefs.current.forEach((timeout) => clearTimeout(timeout));
@@ -207,31 +175,15 @@ export function SignalInput({
     };
   }, []);
 
-  // 当 fixedDate 变化时更新初始日期参考（例如切换了录入的日期）
-  useEffect(() => {
-    if (fixedDate) {
-      initialDateRef.current = fixedDate;
-    }
-  }, [fixedDate]);
-
-  // 计算表单是否“脏”并通知父组件
   useEffect(() => {
     const hasRowContent = rows.some((r) =>
-      r.code ||
-      r.name ||
-      r.sector ||
-      r.concept ||
-      r.turnover ||
-      r.amount ||
-      r.debt_ratio
+      r.stock || r.tags || r.turnover || r.amount || r.debt_ratio
     );
-    const dateChanged = !fixedDate && date !== initialDateRef.current;
-    const dirtyNow = hasRowContent || dateChanged;
-    if (dirtyRef.current !== dirtyNow) {
-      dirtyRef.current = dirtyNow;
-      onDirtyChange?.(dirtyNow);
+    if (dirtyRef.current !== hasRowContent) {
+      dirtyRef.current = hasRowContent;
+      onDirtyChange?.(hasRowContent);
     }
-  }, [rows, date, fixedDate, onDirtyChange]);
+  }, [rows, onDirtyChange]);
 
   const addRow = useCallback(() => {
     setRows((prev) => [...prev, createEmptyRow()]);
@@ -248,62 +200,42 @@ export function SignalInput({
     setRows([
       {
         id: crypto.randomUUID(),
-        code: "600519",
-        name: "贵州茅台",
-        sector: "白酒",
-        concept: "高端消费、酿酒",
+        stock: "600519 贵州茅台",
+        tags: "白酒, 高端消费",
         turnover: "3.2",
         amount: "85",
         debt_ratio: "25.8",
       },
       {
         id: crypto.randomUUID(),
-        code: "002371",
-        name: "北方华创",
-        sector: "半导体",
-        concept: "设备国产替代",
+        stock: "002371 北方华创",
+        tags: "半导体, 设备国产替代",
         turnover: "6.5",
         amount: "42",
         debt_ratio: "38.5",
       },
-      {
-        id: crypto.randomUUID(),
-        code: "300750",
-        name: "宁德时代",
-        sector: "锂电池、新能源",
-        concept: "储能、动力电池",
-        turnover: "8.1",
-        amount: "120",
-        debt_ratio: "52.3",
-      },
     ]);
   }, []);
-
-  // 注意：当前版本不再处理板块分时截图，仅通过表格录入文字与数值数据。
 
   async function handleSubmit() {
     setError(null);
     const records: SignalRecord[] = [];
+    const date = fixedDate || new Date().toISOString().slice(0, 10);
     for (const row of rows) {
       const rec = rowToRecord(row, date);
       if (rec) records.push(rec);
     }
     if (records.length === 0) {
-      setError("至少填入一条有效信号（需填写代码或名称）");
+      setError("至少填入一条有效信号");
       return;
     }
 
     try {
       await onParsed(records);
-      // 提交成功后清空表格
       setRows(Array.from({ length: 1 }, createEmptyRow));
-      initialDateRef.current = date;
-      // 如有需要，通知父组件（例如关闭弹窗）
-      if (onSubmitted) {
-        onSubmitted();
-      }
+      onSubmitted?.();
     } catch (error: any) {
-      setError(error.message || "保存数据失败，请重试");
+      setError(error.message || "保存数据失败");
     }
   }
 
@@ -314,255 +246,123 @@ export function SignalInput({
 
   return (
     <div className="flex flex-col gap-4">
-      {!fixedDate && (
-        <div className="flex items-center justify-between">
-          <div className="text-base font-semibold text-foreground">
-            信号数据录入
-          </div>
-            <div className="flex items-center gap-3">
-              <label className="text-sm font-normal text-muted-foreground">
-                日期
-              </label>
-              <Input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="w-40 bg-secondary text-foreground border-border"
-              />
-          </div>
-            </div>
-          )}
-        <div className="overflow-x-auto overflow-y-visible rounded-md border border-border">
-          <Table className="min-w-full">
-            <TableHeader>
-              <TableRow className="border-border hover:bg-transparent">
-                <TableHead className="text-muted-foreground min-w-[100px] whitespace-nowrap">
-                  代码
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[100px] whitespace-nowrap">
-                  名称
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[140px] whitespace-nowrap">
-                  板块
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[140px] whitespace-nowrap">
-                  概念
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
-                  换手率%
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
-                  市值(亿)
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[100px] whitespace-nowrap">
-                  资产负债率%
-                </TableHead>
-                <TableHead className="text-muted-foreground min-w-[50px]" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((row, idx) => (
-                <TableRow
-                  key={row.id}
-                  className="border-border hover:bg-secondary/50"
-                >
-                  <TableCell className="p-1">
-                    <div className="relative">
-                      <Input
-                        value={row.code}
-                        onChange={(e) =>
-                          updateRow(row.id, "code", e.target.value)
-                        }
-                        placeholder="600519"
-                        className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
-                        maxLength={6}
-                      />
-                      {loadingCodes.has(row.id) && (
-                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">
-                          查询中...
-                        </span>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell className="p-1">
+      <div className="overflow-x-auto overflow-y-visible rounded-md border border-border">
+        <Table className="min-w-full">
+          <TableHeader>
+            <TableRow className="border-border hover:bg-transparent">
+              <TableHead className="text-muted-foreground min-w-[160px] whitespace-nowrap">
+                股票（代码 名称）
+              </TableHead>
+              <TableHead className="text-muted-foreground min-w-[200px] whitespace-nowrap">
+                标签（逗号分隔）
+              </TableHead>
+              <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
+                换手率%
+              </TableHead>
+              <TableHead className="text-muted-foreground min-w-[90px] whitespace-nowrap">
+                市值(亿)
+              </TableHead>
+              <TableHead className="text-muted-foreground min-w-[100px] whitespace-nowrap">
+                资产负债率%
+              </TableHead>
+              <TableHead className="text-muted-foreground min-w-[50px]" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row, idx) => (
+              <TableRow key={row.id} className="border-border hover:bg-secondary/50">
+                <TableCell className="p-1">
+                  <div className="relative">
                     <Input
-                      value={row.name}
-                      onChange={(e) =>
-                        updateRow(row.id, "name", e.target.value)
-                      }
-                      placeholder="贵州茅台"
+                      value={row.stock}
+                      onChange={(e) => updateRow(row.id, "stock", e.target.value)}
+                      placeholder="600519 贵州茅台"
                       className="h-8 bg-secondary text-foreground border-border text-xs px-2"
-                      title={row.name ? `股票名称: ${row.name}` : "请输入股票名称或通过代码自动获取"}
                     />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      value={row.sector}
-                      onChange={(e) =>
-                        updateRow(row.id, "sector", e.target.value)
-                      }
-                      placeholder="白酒、消费"
-                      list={existingSectors.length > 0 ? `sector-datalist-${row.id}` : undefined}
-                      className="h-8 bg-secondary text-foreground border-border text-xs px-2"
-                      title={row.sector ? `板块: ${row.sector}` : "请输入板块（多个用、分隔），可从历史选项选择"}
-                    />
-                    {existingSectors.length > 0 && (
-                      <datalist id={`sector-datalist-${row.id}`}>
-                        {existingSectors.map((s) => (
-                          <option key={s} value={s} />
-                        ))}
-                      </datalist>
+                    {loadingCodes.has(row.id) && (
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">
+                        查询中...
+                      </span>
                     )}
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      value={row.concept}
-                      onChange={(e) =>
-                        updateRow(row.id, "concept", e.target.value)
-                      }
-                      placeholder="AI眼镜、低空经济"
-                      className="h-8 bg-secondary text-foreground border-border text-xs px-2"
-                      title={row.concept ? `概念: ${row.concept}` : "请输入概念（多个用、分隔）"}
-                    />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={row.turnover}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        // 数据类型检测：只允许数字和小数点
-                        if (val === "" || /^\d*\.?\d*$/.test(val)) {
-                          updateRow(row.id, "turnover", val);
-                        }
-                      }}
-                      placeholder="3.2"
-                      className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
-                      title={row.turnover ? `换手率: ${row.turnover}%` : "请输入换手率或通过代码自动获取"}
-                    />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={row.amount}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        // 数据类型检测：只允许数字和小数点
-                        if (val === "" || /^\d*\.?\d*$/.test(val)) {
-                          updateRow(row.id, "amount", val);
-                        }
-                      }}
-                      placeholder="85"
-                      className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
-                      title={row.amount ? `市值: ${row.amount} 亿` : "请输入市值或通过代码自动获取"}
-                    />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Input
-                      type="number"
-                      step="0.01"
-                      value={row.debt_ratio}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        // 数据类型检测：只允许数字和小数点，范围 0-100
-                        if (val === "" || /^\d*\.?\d*$/.test(val)) {
-                          const num = parseFloat(val);
-                          if (val === "" || (!isNaN(num) && num >= 0 && num <= 100)) {
-                            updateRow(row.id, "debt_ratio", val);
-                          }
-                        }
-                      }}
-                      placeholder="45.2"
-                      className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
-                      title={row.debt_ratio ? `资产负债率: ${row.debt_ratio}%` : "请输入资产负债率（0-100%）"}
-                    />
-                  </TableCell>
-                  <TableCell className="p-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeRow(row.id)}
-                      disabled={rows.length <= 1}
-                      className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                      aria-label={`删除第${idx + 1}行`}
-                    >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M18 6 6 18" />
-                        <path d="m6 6 12 12" />
-                      </svg>
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+                  </div>
+                </TableCell>
+                <TableCell className="p-1">
+                  <Input
+                    value={row.tags}
+                    onChange={(e) => updateRow(row.id, "tags", e.target.value)}
+                    placeholder="白酒, 高端消费"
+                    className="h-8 bg-secondary text-foreground border-border text-xs px-2"
+                  />
+                </TableCell>
+                <TableCell className="p-1">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={row.turnover}
+                    onChange={(e) => updateRow(row.id, "turnover", e.target.value)}
+                    placeholder="3.2"
+                    className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
+                  />
+                </TableCell>
+                <TableCell className="p-1">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={row.amount}
+                    onChange={(e) => updateRow(row.id, "amount", e.target.value)}
+                    placeholder="85"
+                    className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
+                  />
+                </TableCell>
+                <TableCell className="p-1">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={row.debt_ratio}
+                    onChange={(e) => updateRow(row.id, "debt_ratio", e.target.value)}
+                    placeholder="45.2"
+                    className="h-8 bg-secondary text-foreground border-border text-xs font-mono px-2"
+                  />
+                </TableCell>
+                <TableCell className="p-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeRow(row.id)}
+                    disabled={rows.length <= 1}
+                    className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                  >
+                    ×
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
 
-        {error && <p className="text-sm text-destructive">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={addRow}
-              className="text-foreground border-border hover:bg-secondary bg-transparent"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="mr-1"
-              >
-                <path d="M5 12h14" />
-                <path d="M12 5v14" />
-              </svg>
-              添加行
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={addSampleData}
-              className="text-muted-foreground border-border hover:bg-secondary hover:text-foreground bg-transparent"
-            >
-              填入示例
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleClearAll}
-              className="text-muted-foreground border-border hover:bg-secondary hover:text-foreground bg-transparent"
-            >
-              清空表格
-            </Button>
-          </div>
-          <Button
-            onClick={handleSubmit}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 px-8"
-          >
-            录入
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={addRow}>
+            + 添加行
+          </Button>
+          <Button variant="outline" size="sm" onClick={addSampleData}>
+            填入示例
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleClearAll}>
+            清空表格
           </Button>
         </div>
+        <Button onClick={handleSubmit} className="bg-primary text-primary-foreground px-8">
+          录入
+        </Button>
+      </div>
 
-        <p className="text-xs text-muted-foreground">
-        填写代码和名称即可录入。板块和概念支持多个，使用顿号或逗号分隔。
-        </p>
+      <p className="text-xs text-muted-foreground">
+        填写"代码 名称"即可录入，如 "600519 贵州茅台"。标签支持多个，使用逗号分隔。
+      </p>
     </div>
   );
 }

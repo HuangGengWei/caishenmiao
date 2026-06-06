@@ -43,54 +43,36 @@ export function SignalTable({
             <TableHeader>
               <TableRow className="border-border hover:bg-transparent">
                 <TableHead className="text-muted-foreground w-10">#</TableHead>
-                <TableHead className="text-muted-foreground">代码</TableHead>
-                <TableHead className="text-muted-foreground">名称</TableHead>
-                <TableHead className="text-muted-foreground">板块</TableHead>
-                <TableHead className="text-muted-foreground">概念</TableHead>
+                <TableHead className="text-muted-foreground">股票</TableHead>
+                <TableHead className="text-muted-foreground">标签</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {display.map((r, i) => (
                 <TableRow
-                  key={`${r.code}-${r.date}-${i}`}
+                  key={`${r.stock}-${i}`}
                   className="border-border hover:bg-secondary/50"
                 >
                   <TableCell className="text-muted-foreground font-mono text-xs">
                     {i + 1}
                   </TableCell>
-                  <TableCell className="font-mono text-sm text-foreground">
-                    {r.code}
-                  </TableCell>
                   <TableCell className="font-medium text-foreground">
-                    {r.name}
+                    {r.stock}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
-                      {r.sector.map((s) => (
-                        <Badge
-                          key={s}
-                          className="text-sm font-semibold bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
-                        >
-                          {s}
-                        </Badge>
-                      ))}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {(r.concept ?? []).length > 0 ? (
-                        (r.concept ?? []).map((c) => (
+                      {(r.tags || "").split(/[,，]/).map((t) => {
+                        const tag = t.trim();
+                        if (!tag) return null;
+                        return (
                           <Badge
-                            key={c}
-                            variant="outline"
-                            className="text-xs border-amber-500/40 text-amber-700 dark:text-amber-400"
+                            key={tag}
+                            className="text-sm font-semibold bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
                           >
-                            {c}
+                            {tag}
                           </Badge>
-                        ))
-                      ) : (
-                        <span className="text-muted-foreground text-xs">-</span>
-                      )}
+                        );
+                      })}
                     </div>
                   </TableCell>
                 </TableRow>

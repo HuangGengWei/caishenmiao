@@ -38,25 +38,28 @@ interface StocksPageProps {
 }
 
 type SortKey =
-  | "date"
-  | "code"
-  | "name"
+  | "stock"
   | "amount"
   | "debt_ratio"
-  | "peTTM"
   | "holderNum"
   | "daysSinceLimitUp"
+  | "daysSinceLimitDown"
   | "maProximity"
   | "highProximity"
+  | "chg"
   | "gentleWeeklyVolume";
 
 interface DailyChartPoint {
   date: string;
+  open: number;
+  high: number;
+  low: number;
   close: number;
   ma5: number | null;
   ma30: number | null;
   vol5: number | null;  // 5日成交量均线
   vol10: number | null; // 10日成交量均线
+  pct_chg: number | null; // 涨跌幅 %
 }
 
 interface Ma5Ma30Status {
@@ -66,12 +69,19 @@ interface Ma5Ma30Status {
   volNear: boolean | null; // 5日成交量与10日成交量是否接近
   latestTradeDate: string | null;
   lastCrossDate: string | null; // 上次 MA5 与 MA30 交叉的日期
+  lastCrossDirection: "up" | "down" | null; // 上次交叉方向：up=金叉，down=死叉
   loading: boolean;
   error?: string;
 }
 
 interface LimitUpInfo {
   lastLimitUpDate: string | null;  // 上个涨停日
+  loading: boolean;
+  error?: string;
+}
+
+interface LimitDownInfo {
+  lastLimitDownDate: string | null;  // 上个跌停日
   loading: boolean;
   error?: string;
 }
@@ -100,7 +110,7 @@ interface HighPointInfo {
 
 interface HighProximityInfo {
   highPoints: HighPointInfo[];      // 多个前高点（按价格降序）
-  nearestHighIndex: number;         // 距离目标价最近的高点索引
+  nearestHighIndex: number;         // 最接近收盘价的高点索引
   latestClose: number | null;
   latestTradeDate: string | null;
   targetPrice: number | null;
@@ -120,10 +130,9 @@ export function StocksPage({ records }: StocksPageProps) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("all");
-  const [conceptFilter, setConceptFilter] = useState("all");
-  const [dateRangeFilter, setDateRangeFilter] = useState<"all" | "7" | "14" | "30" | "60">("14");
-  const [sortKey, setSortKey] = useState<SortKey>("date");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [dateFilter, setDateFilter] = useState<"all" | "5" | "10" | "20" | "30" | "60" | "120">("30");
+  const [sortKey, setSortKey] = useState<SortKey>("stock");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [pageSize, setPageSize] = useState<"10" | "20" | "50" | "all">("10");
   const [pageIndex, setPageIndex] = useState(0);
 
@@ -182,9 +191,11 @@ export function StocksPage({ records }: StocksPageProps) {
   // 涨停信息（用于计算距上个涨停日天数）：key = code
   const [limitUpMap, setLimitUpMap] = useState<Record<string, LimitUpInfo>>({});
 
-  // 股票信息（含 PE(TTM)、股东人数趋势）：key = code
+  // 跌停信息（用于计算距上个跌停日天数）：key = code
+  const [limitDownMap, setLimitDownMap] = useState<Record<string, LimitDownInfo>>({});
+
+  // 股票信息（含股东人数趋势）：key = code
   const [stockInfoMap, setStockInfoMap] = useState<Record<string, { 
-    peTTM: number | null; 
     holderNum: number | null; 
     holderTrend: {
       periods: Array<{
@@ -223,6 +234,7 @@ export function StocksPage({ records }: StocksPageProps) {
           typicalNearMa30: p?.typicalNearMa30 ?? null,
           volNear: p?.volNear ?? null,
           lastCrossDate: p?.lastCrossDate ?? null,
+          lastCrossDirection: p?.lastCrossDirection ?? null,
           loading: true,
           error: undefined,
         },
@@ -243,6 +255,7 @@ export function StocksPage({ records }: StocksPageProps) {
               typicalNearMa30: p?.typicalNearMa30 ?? null,
               volNear: p?.volNear ?? null,
               lastCrossDate: p?.lastCrossDate ?? null,
+              lastCrossDirection: p?.lastCrossDirection ?? null,
               loading: false,
               error: data.error || "获取失败",
             },
@@ -264,6 +277,7 @@ export function StocksPage({ records }: StocksPageProps) {
           volNear: data.volNear ?? false,
           latestTradeDate: latestDate,
           lastCrossDate: data.lastCrossDate ?? null,
+          lastCrossDirection: data.lastCrossDirection ?? null,
           loading: false,
         };
         // 比较新旧数据，如果相同则不更新
@@ -274,7 +288,8 @@ export function StocksPage({ records }: StocksPageProps) {
           p.near === newData.near &&
           p.typicalNearMa30 === newData.typicalNearMa30 &&
           p.volNear === newData.volNear &&
-          p.lastCrossDate === newData.lastCrossDate
+          p.lastCrossDate === newData.lastCrossDate &&
+          p.lastCrossDirection === newData.lastCrossDirection
         ) {
           // 数据相同，不触发重绘
           return prev;
@@ -301,6 +316,7 @@ export function StocksPage({ records }: StocksPageProps) {
             typicalNearMa30: p?.typicalNearMa30 ?? null,
             volNear: p?.volNear ?? null,
             lastCrossDate: p?.lastCrossDate ?? null,
+            lastCrossDirection: p?.lastCrossDirection ?? null,
             loading: false,
             error: e?.message || "网络请求失败",
           },
@@ -363,11 +379,64 @@ export function StocksPage({ records }: StocksPageProps) {
     []
   );
 
+  const fetchLimitDown = useCallback(
+    async (code: string) => {
+      setLimitDownMap((prev) => {
+        const p = prev[code];
+        return {
+          ...prev,
+          [code]: {
+            lastLimitDownDate: p?.lastLimitDownDate ?? null,
+            loading: true,
+            error: undefined,
+          },
+        };
+      });
+      try {
+        const res = await fetch(`/api/tushare/limit-down?code=${code}`);
+        const data = await res.json();
+        if (!res.ok) {
+          setLimitDownMap((prev) => {
+            const p = prev[code];
+            return {
+              ...prev,
+              [code]: {
+                lastLimitDownDate: p?.lastLimitDownDate ?? null,
+                loading: false,
+                error: data.error || "获取失败",
+              },
+            };
+          });
+          return;
+        }
+        setLimitDownMap((prev) => ({
+          ...prev,
+          [code]: {
+            lastLimitDownDate: data.lastLimitDownDate ?? null,
+            loading: false,
+          },
+        }));
+      } catch (e: any) {
+        setLimitDownMap((prev) => {
+          const p = prev[code];
+          return {
+            ...prev,
+            [code]: {
+              lastLimitDownDate: p?.lastLimitDownDate ?? null,
+              loading: false,
+              error: e?.message || "网络请求失败",
+            },
+          };
+        });
+      }
+    },
+    []
+  );
+
   const fetchStockInfo = useCallback(async (code: string, tradeDate?: string) => {
     setStockInfoMap((prev) => ({
       ...prev,
       [code]: {
-        peTTM: prev[code]?.peTTM ?? null,
         holderNum: prev[code]?.holderNum ?? null,
         holderTrend: prev[code]?.holderTrend ?? null,
         loading: true,
@@ -384,7 +453,6 @@ export function StocksPage({ records }: StocksPageProps) {
         setStockInfoMap((prev) => ({
           ...prev,
           [code]: {
-            peTTM: prev[code]?.peTTM ?? null,
             holderNum: prev[code]?.holderNum ?? null,
             holderTrend: prev[code]?.holderTrend ?? null,
             loading: false,
@@ -396,7 +464,6 @@ export function StocksPage({ records }: StocksPageProps) {
       setStockInfoMap((prev) => ({
         ...prev,
         [code]: {
-          peTTM: data.peTTM ?? null,
           holderNum: data.holderNum ?? null,
           holderTrend: data.holderTrend ? {
             periods: data.holderTrend.periods || [],
@@ -413,7 +480,6 @@ export function StocksPage({ records }: StocksPageProps) {
       setStockInfoMap((prev) => ({
         ...prev,
         [code]: {
-          peTTM: prev[code]?.peTTM ?? null,
           holderNum: prev[code]?.holderNum ?? null,
           holderTrend: prev[code]?.holderTrend ?? null,
           loading: false,
@@ -564,79 +630,70 @@ export function StocksPage({ records }: StocksPageProps) {
     }
   }, []);
 
-  const allSectors = useMemo(() => {
+  const allTags = useMemo(() => {
     const set = new Set<string>();
     for (const r of records) {
-      for (const s of r.sector) set.add(s);
+      const tags = (r.tags || "").split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+      for (const t of tags) set.add(t);
     }
     return Array.from(set).sort();
   }, [records]);
 
-  const allConcepts = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of records) {
-      for (const c of r.concept ?? []) set.add(c);
-    }
-    return Array.from(set).sort();
-  }, [records]);
-
-  // 按股票代码去重：同一只股票保留最新录入日的一条记录
+  // 按股票代码去重，保留录入日最新的记录
   const dedupedRecords = useMemo(() => {
-    const latest = new Map<string, SignalRecord>();
+    const map = new Map<string, SignalRecord>();
     for (const r of records) {
-      const existing = latest.get(r.code);
-      if (!existing || r.date > existing.date) {
-        latest.set(r.code, r);
+      const code = (r.stock || "").split(" ")[0] || "";
+      if (!code) continue;
+      const existing = map.get(code);
+      if (!existing || (r.date && (!existing.date || r.date > existing.date))) {
+        map.set(code, r);
       }
     }
-    return Array.from(latest.values());
+    return Array.from(map.values());
   }, [records]);
 
   const filtered = useMemo(() => {
     let list = [...dedupedRecords];
 
-    // 时间范围筛选：只显示最近 N 天内录入的股票
-    if (dateRangeFilter !== "all") {
-      const days = parseInt(dateRangeFilter, 10);
-      const cutoffDate = new Date();
+    // 时间范围筛选
+    if (dateFilter !== "all") {
+      const today = new Date();
+      const daysMap: Record<string, number> = {
+        "5": 5,
+        "10": 10,
+        "20": 20,
+        "30": 30,
+        "60": 60,
+        "120": 120,
+      };
+      const days = daysMap[dateFilter] || 0;
+      const cutoffDate = new Date(today);
       cutoffDate.setDate(cutoffDate.getDate() - days);
       const cutoffStr = cutoffDate.toISOString().slice(0, 10);
-      list = list.filter((r) => r.date >= cutoffStr);
+      list = list.filter((r) => r.date && r.date >= cutoffStr);
     }
 
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.trim().toLowerCase();
       list = list.filter(
         (r) =>
-          r.code.includes(q) ||
-          r.name.toLowerCase().includes(q) ||
-          r.sector.some((s) => s.toLowerCase().includes(q)) ||
-          (r.concept ?? []).some((c) => c.toLowerCase().includes(q))
+          (r.stock || "").toLowerCase().includes(q) ||
+          (r.tags || "").toLowerCase().includes(q)
       );
     }
 
     if (sectorFilter !== "all") {
-      list = list.filter((r) => r.sector.includes(sectorFilter));
-    }
-    if (conceptFilter !== "all") {
-      list = list.filter((r) => (r.concept ?? []).includes(conceptFilter));
+      list = list.filter((r) => (r.tags || "").includes(sectorFilter));
     }
 
     list.sort((a, b) => {
       let av: string | number | null = null;
       let bv: string | number | null = null;
       switch (sortKey) {
-        case "date":
-          av = a.date;
-          bv = b.date;
-          break;
-        case "code":
-          av = a.code;
-          bv = b.code;
-          break;
-        case "name":
-          av = a.name;
-          bv = b.name;
+        case "stock":
+          av = a.stock;
+          bv = b.stock;
           break;
         case "amount":
           av = a.amount;
@@ -646,20 +703,15 @@ export function StocksPage({ records }: StocksPageProps) {
           av = a.debt_ratio;
           bv = b.debt_ratio;
           break;
-        case "peTTM": {
-          const getPE = (r: SignalRecord): number | null => {
-            const s = stockInfoMap[r.code];
-            if (!s || s.peTTM == null) return null;
-            return s.peTTM;
-          };
-          av = getPE(a);
-          bv = getPE(b);
-          break;
-        }
         case "holderNum": {
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
           // 按股东人数趋势评分排序：连续降低越多，排序越靠前
           const getTrendScore = (r: SignalRecord): number => {
-            const s = stockInfoMap[r.code];
+            const code = getCode(r);
+            const s = stockInfoMap[code];
             if (!s || s.loading || !s.holderTrend) return -999;
             return s.holderTrend.trendScore;
           };
@@ -672,8 +724,13 @@ export function StocksPage({ records }: StocksPageProps) {
           break;
         }
         case "daysSinceLimitUp": {
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
           const getDays = (r: SignalRecord): number | null => {
-            const info = limitUpMap[r.code];
+            const code = getCode(r);
+            const info = limitUpMap[code];
             if (!info || info.loading || !info.lastLimitUpDate) return null;
             // 计算距上个涨停日的交易日天数
             const today = new Date().toISOString().slice(0, 10);
@@ -685,9 +742,33 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = getDays(b);
           break;
         }
+        case "daysSinceLimitDown": {
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
+          const getDays = (r: SignalRecord): number | null => {
+            const code = getCode(r);
+            const info = limitDownMap[code];
+            if (!info || info.loading || !info.lastLimitDownDate) return null;
+            // 计算距上个跌停日的交易日天数
+            const today = new Date().toISOString().slice(0, 10);
+            const lastLimitDown = info.lastLimitDownDate;
+            if (tradingDays.length === 0) return null;
+            return tradingDays.filter((d) => d > lastLimitDown && d <= today).length;
+          };
+          av = getDays(a);
+          bv = getDays(b);
+          break;
+        }
         case "maProximity": {
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
           const getProximity = (r: SignalRecord): number | null => {
-            const s = ma5ma30Map[r.code];
+            const code = getCode(r);
+            const s = ma5ma30Map[code];
             if (!s || !s.series || s.series.length === 0) return null;
             const latest = s.series[s.series.length - 1];
             if (
@@ -706,8 +787,13 @@ export function StocksPage({ records }: StocksPageProps) {
           break;
         }
         case "highProximity": {
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
           const getProximity = (r: SignalRecord): number | null => {
-            const s = highProximityMap[r.code];
+            const code = getCode(r);
+            const s = highProximityMap[code];
             if (!s || !s.highPoints || s.highPoints.length === 0) return null;
             // 使用最近的前高点距离
             const nearest = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
@@ -717,19 +803,26 @@ export function StocksPage({ records }: StocksPageProps) {
           bv = getProximity(b);
           break;
         }
+        case "chg": {
+          av = a.chg;
+          bv = b.chg;
+          break;
+        }
         case "gentleWeeklyVolume": {
-          // 按温和放量形态强度排序
+          const getCode = (r: SignalRecord): string => {
+            const parts = (r.stock || "").split(" ");
+            return parts[0] || "";
+          };
+          // 按温和放量形态强度排序：有形态的排在前面
           const getPatternStrength = (r: SignalRecord): number => {
-            const s = weeklyVolumePatternMap[r.code];
+            const code = getCode(r);
+            const s = weeklyVolumePatternMap[code];
             if (!s || s.loading || s.error) return -999;
             if (s.hasPattern) return s.patternStrength;
             return -100 + (s.patternStrength || 0);
           };
           av = getPatternStrength(a);
           bv = getPatternStrength(b);
-          if (sortDir === "asc") {
-            [av, bv] = [bv, av];
-          }
           break;
         }
       }
@@ -746,11 +839,11 @@ export function StocksPage({ records }: StocksPageProps) {
     dedupedRecords,
     debouncedSearch,
     sectorFilter,
-    conceptFilter,
-    dateRangeFilter,
+    dateFilter,
     sortKey,
     sortDir,
     limitUpMap,
+    limitDownMap,
     stockInfoMap,
     tradingDays,
     ma5ma30Map,
@@ -771,7 +864,7 @@ export function StocksPage({ records }: StocksPageProps) {
   // 当过滤条件或页大小变化时，重置或校正页码
   useEffect(() => {
     setPageIndex(0);
-  }, [debouncedSearch, sectorFilter, conceptFilter, dateRangeFilter, sortKey, sortDir, pageSize]);
+  }, [debouncedSearch, sectorFilter, sortKey, sortDir, pageSize]);
 
   useEffect(() => {
     if (pageSize === "all") return;
@@ -882,6 +975,7 @@ export function StocksPage({ records }: StocksPageProps) {
 
   const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
   const fetchedLimitUpRef = useRef<Set<string>>(new Set());
+  const fetchedLimitDownRef = useRef<Set<string>>(new Set());
   const fetchedHighProximityRef = useRef<Set<string>>(new Set());
   const fetchedWeeklyVolumeRef = useRef<Set<string>>(new Set());
 
@@ -889,17 +983,22 @@ export function StocksPage({ records }: StocksPageProps) {
   useEffect(() => {
     fetchedMa5Ma30Ref.current.clear();
     fetchedLimitUpRef.current.clear();
+    fetchedLimitDownRef.current.clear();
     fetchedHighProximityRef.current.clear();
     fetchedWeeklyVolumeRef.current.clear();
-  }, [debouncedSearch, sectorFilter, conceptFilter, dateRangeFilter]);
+  }, [debouncedSearch, sectorFilter]);
 
   useEffect(() => {
     // 5日线/30日线排序需要全量数据才能正确排序
     const needFullData = sortKey === "maProximity";
     const needFullWeekly = sortKey === "gentleWeeklyVolume";
+    
+    // 从 stock 字段提取代码
+    const getCode = (stock: string) => (stock || "").split(" ")[0] || "";
+    
     const baseCodes = needFullData || needFullWeekly
-      ? Array.from(new Set(filtered.map((r) => r.code)))
-      : Array.from(new Set(visibleRecords.map((r) => r.code)));
+      ? Array.from(new Set(filtered.map((r) => getCode(r.stock))))
+      : Array.from(new Set(visibleRecords.map((r) => getCode(r.stock))));
 
     // MA5MA30: 排序时获取全量，否则只获取可见页（通过队列控制速率）
     for (const code of baseCodes) {
@@ -910,7 +1009,7 @@ export function StocksPage({ records }: StocksPageProps) {
     }
 
     // 其他数据只获取当前可见页面（通过队列控制速率）
-    const visibleCodes = Array.from(new Set(visibleRecords.map((r) => r.code)));
+    const visibleCodes = Array.from(new Set(visibleRecords.map((r) => getCode(r.stock))));
     for (const code of visibleCodes) {
       if (!fetchedHighProximityRef.current.has(code)) {
         fetchedHighProximityRef.current.add(code);
@@ -920,11 +1019,15 @@ export function StocksPage({ records }: StocksPageProps) {
         fetchedLimitUpRef.current.add(code);
         enqueueRequest(async () => { await fetchLimitUp(code); });
       }
+      if (!fetchedLimitDownRef.current.has(code)) {
+        fetchedLimitDownRef.current.add(code);
+        enqueueRequest(async () => { await fetchLimitDown(code); });
+      }
     }
 
     // 周线放量：排序时获取全量，否则只获取可见页
     const weeklyCodes = needFullWeekly
-      ? Array.from(new Set(filtered.map((r) => r.code)))
+      ? Array.from(new Set(filtered.map((r) => getCode(r.stock))))
       : visibleCodes;
     for (const code of weeklyCodes) {
       if (!fetchedWeeklyVolumeRef.current.has(code)) {
@@ -954,7 +1057,7 @@ export function StocksPage({ records }: StocksPageProps) {
       setSortKey(key);
       // 涨停天数 & MA 接近程度都是“数值越小越好”，默认升序；其它默认降序
       setSortDir(
-        key === "limitUpDays" || key === "maProximity" || key === "highProximity"
+        key === "daysSinceLimitUp" || key === "daysSinceLimitDown" || key === "maProximity" || key === "highProximity" || key === "stock"
           ? "asc"
           : "desc"
       );
@@ -967,32 +1070,6 @@ export function StocksPage({ records }: StocksPageProps) {
     return (
       <span className="ml-1 text-primary">
         {sortDir === "asc" ? "↑" : "↓"}
-      </span>
-    );
-  }
-
-  /** PE(TTM) 显示 */
-  function PECell({ code }: { code: string }) {
-    const s = stockInfoMap[code];
-    if (!s) {
-      return <span className="text-xs text-muted-foreground">加载中…</span>;
-    }
-    if (s.loading) {
-      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
-    }
-    if (s.error && s.peTTM == null) {
-      return (
-        <span className="text-[10px] text-destructive" title={s.error}>
-          查询失败
-        </span>
-      );
-    }
-    if (s.peTTM == null) {
-      return <span className="text-xs text-muted-foreground">-</span>;
-    }
-    return (
-      <span className="font-mono text-xs text-foreground font-semibold">
-        {s.peTTM.toFixed(1)}
       </span>
     );
   }
@@ -1172,7 +1249,7 @@ export function StocksPage({ records }: StocksPageProps) {
       <div className="flex flex-col gap-0.5">
         <span className={
           days != null && days <= 3
-            ? "font-mono text-xs text-stock-up font-bold"
+            ? "font-mono text-xs text-red-600 font-bold"
             : days != null && days <= 10
               ? "font-mono text-xs text-primary font-semibold"
               : "font-mono text-xs text-foreground"
@@ -1181,6 +1258,47 @@ export function StocksPage({ records }: StocksPageProps) {
         </span>
         <span className="text-[10px] text-muted-foreground">
           {info.lastLimitUpDate}
+        </span>
+      </div>
+    );
+  }
+
+  /** 距上个跌停日的交易日天数 */
+  function DaysSinceLimitDownCell({ code }: { code: string }) {
+    const info = limitDownMap[code];
+    if (!info) {
+      return <span className="text-xs text-muted-foreground">加载中…</span>;
+    }
+    if (info.loading) {
+      return <span className="text-xs text-muted-foreground animate-pulse">查询中…</span>;
+    }
+    if (info.error && !info.lastLimitDownDate) {
+      return (
+        <span className="text-[10px] text-destructive" title={info.error}>
+          查询失败
+        </span>
+      );
+    }
+    if (!info.lastLimitDownDate) {
+      return <span className="text-xs text-muted-foreground">暂无跌停</span>;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const days = tradingDays.length > 0
+      ? tradingDays.filter((d) => d > info.lastLimitDownDate! && d <= today).length
+      : null;
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className={
+          days != null && days <= 3
+            ? "font-mono text-xs text-green-600 font-bold"
+            : days != null && days <= 10
+              ? "font-mono text-xs text-orange-500 font-semibold"
+              : "font-mono text-xs text-foreground"
+        }>
+          {days !== null ? `${days}日` : "-"}
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          {info.lastLimitDownDate}
         </span>
       </div>
     );
@@ -1302,12 +1420,14 @@ export function StocksPage({ records }: StocksPageProps) {
             </Badge>
           )}
           {s.lastCrossDate && (
-            <span className="text-[10px] text-muted-foreground">
+            <span className={`text-[10px] ${s.lastCrossDirection === 'up' ? 'text-red-600' : s.lastCrossDirection === 'down' ? 'text-green-600' : 'text-muted-foreground'}`}>
               上次交叉: {s.lastCrossDate}
+              {s.lastCrossDirection === 'up' && ' (金叉↑)'}
+              {s.lastCrossDirection === 'down' && ' (死叉↓)'}
               {tradingDays.length > 0 && (() => {
                 const today = new Date().toISOString().slice(0, 10);
                 const days = tradingDays.filter((d) => d > s.lastCrossDate! && d <= today).length;
-                return ` (${days}日前)`;
+                return ` ${days}日前`;
               })()}
             </span>
           )}
@@ -1346,33 +1466,34 @@ export function StocksPage({ records }: StocksPageProps) {
 
     // 获取最近的前高点
     const nearestHigh = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
-    const isNear = nearestHigh.proximityPercent <= 5;
-    const isVeryNear = nearestHigh.proximityPercent <= 2;
+    const isAbove = nearestHigh.proximityPercent >= 0; // 正值=突破，负值=假摔
+    const absProximity = Math.abs(nearestHigh.proximityPercent);
+    const isNear = absProximity <= 5;
+    const isVeryNear = absProximity <= 2;
 
     return (
       <div className="flex flex-col gap-0.5 min-w-[120px]">
         <div className="flex items-center gap-1.5">
-          <span className="font-mono text-xs text-foreground font-semibold">
-            {nearestHigh.proximityPercent.toFixed(2)}%
+          <span className={`font-mono text-xs font-semibold ${isAbove ? 'text-red-600' : 'text-green-600'}`}>
+            {isAbove ? '+' : ''}{nearestHigh.proximityPercent.toFixed(2)}%
           </span>
           {isVeryNear && (
-            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-stock-up/20 text-stock-up border border-stock-up/40 font-semibold">
-              极近
+            <Badge className={`text-[10px] px-1.5 py-0 h-5 font-semibold ${isAbove ? 'bg-red-500/20 text-red-600 border-red-500/40' : 'bg-green-500/20 text-green-600 border-green-500/40'}`}>
+              {isAbove ? '真突破' : '假摔'}
             </Badge>
           )}
           {isNear && !isVeryNear && (
-            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-primary/20 text-primary border border-primary/40 font-semibold">
-              接近
+            <Badge className={`text-[10px] px-1.5 py-0 h-5 font-semibold ${isAbove ? 'bg-red-500/20 text-red-600 border-red-500/40' : 'bg-green-500/20 text-green-600 border-green-500/40'}`}>
+              {isAbove ? '接近突破' : '接近支撑'}
             </Badge>
           )}
         </div>
         <div className="text-[10px] text-muted-foreground leading-tight">
           {s.highPoints.map((hp, idx) => (
             <div key={idx} className={idx === s.nearestHighIndex ? "text-foreground font-medium" : ""}>
-              第{idx + 1}高: {hp.price.toFixed(2)} ({hp.date}) {hp.proximityPercent.toFixed(1)}%
+              第{idx + 1}高: {hp.price.toFixed(2)} ({hp.date}) {hp.proximityPercent >= 0 ? '+' : ''}{hp.proximityPercent.toFixed(1)}%
             </div>
           ))}
-          <div>目标: {s.targetPrice?.toFixed(2)} (收盘+10%)</div>
           <div>最新: {s.latestClose?.toFixed(2)}</div>
         </div>
       </div>
@@ -1454,7 +1575,7 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
       <div className="flex flex-col gap-0.5 min-w-[100px]">
         <div className="flex items-center gap-1.5">
           <Badge className={`text-[10px] px-1.5 py-0 h-5 w-fit ${strengthColor} font-semibold`}>
-            温和放量
+            周线温和放量
           </Badge>
           <span className="text-[10px] text-muted-foreground">{s.patternStrength}%</span>
         </div>
@@ -1523,13 +1644,13 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
             />
             <Select value={sectorFilter} onValueChange={setSectorFilter}>
               <SelectTrigger className="w-40 bg-secondary text-foreground border-border text-sm">
-                <SelectValue placeholder="板块筛选" />
+                <SelectValue placeholder="标签筛选" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border text-foreground">
                 <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
-                  全部板块
+                  全部标签
                 </SelectItem>
-                {allSectors.map((s) => (
+                {allTags.map((s) => (
                   <SelectItem
                     key={s}
                     value={s}
@@ -1540,45 +1661,18 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                 ))}
               </SelectContent>
             </Select>
-            <Select value={conceptFilter} onValueChange={setConceptFilter}>
-              <SelectTrigger className="w-40 bg-secondary text-foreground border-border text-sm">
-                <SelectValue placeholder="概念筛选" />
+            <Select value={dateFilter} onValueChange={(v) => setDateFilter(v as any)}>
+              <SelectTrigger className="w-28 bg-secondary text-foreground border-border text-sm">
+                <SelectValue placeholder="时间筛选" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border text-foreground">
-                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
-                  全部概念
-                </SelectItem>
-                {allConcepts.map((c) => (
-                  <SelectItem
-                    key={c}
-                    value={c}
-                    className="text-sm focus:bg-secondary focus:text-foreground"
-                  >
-                    {c}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={dateRangeFilter} onValueChange={(v) => setDateRangeFilter(v as "all" | "7" | "14" | "30" | "60")}>
-              <SelectTrigger className="w-32 bg-secondary text-foreground border-border text-sm">
-                <SelectValue placeholder="时间范围" />
-              </SelectTrigger>
-              <SelectContent className="bg-card border-border text-foreground">
-                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">
-                  全部
-                </SelectItem>
-                <SelectItem value="7" className="text-sm focus:bg-secondary focus:text-foreground">
-                  近7天
-                </SelectItem>
-                <SelectItem value="14" className="text-sm focus:bg-secondary focus:text-foreground">
-                  近14天
-                </SelectItem>
-                <SelectItem value="30" className="text-sm focus:bg-secondary focus:text-foreground">
-                  近30天
-                </SelectItem>
-                <SelectItem value="60" className="text-sm focus:bg-secondary focus:text-foreground">
-                  近60天
-                </SelectItem>
+                <SelectItem value="all" className="text-sm focus:bg-secondary focus:text-foreground">全部</SelectItem>
+                <SelectItem value="5" className="text-sm focus:bg-secondary focus:text-foreground">5天内</SelectItem>
+                <SelectItem value="10" className="text-sm focus:bg-secondary focus:text-foreground">10天内</SelectItem>
+                <SelectItem value="20" className="text-sm focus:bg-secondary focus:text-foreground">20天内</SelectItem>
+                <SelectItem value="30" className="text-sm focus:bg-secondary focus:text-foreground">30天内</SelectItem>
+                <SelectItem value="60" className="text-sm focus:bg-secondary focus:text-foreground">60天内</SelectItem>
+                <SelectItem value="120" className="text-sm focus:bg-secondary focus:text-foreground">120天内</SelectItem>
               </SelectContent>
             </Select>
             <Select
@@ -1586,7 +1680,7 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
               onValueChange={(v) => {
                 setSortKey(v as SortKey);
                 setSortDir(
-                  v === "peTTM" || v === "daysSinceLimitUp" || v === "maProximity" || v === "highProximity" ? "asc" : "desc"
+                  v === "daysSinceLimitUp" || v === "maProximity" || v === "highProximity" || v === "stock" ? "asc" : "desc"
                 );
               }}
             >
@@ -1594,17 +1688,15 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                 <SelectValue placeholder="排序" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border text-foreground">
-                <SelectItem value="date" className="text-sm focus:bg-secondary focus:text-foreground">录入日</SelectItem>
-                <SelectItem value="code" className="text-sm focus:bg-secondary focus:text-foreground">代码</SelectItem>
-                <SelectItem value="name" className="text-sm focus:bg-secondary focus:text-foreground">名称</SelectItem>
+                <SelectItem value="stock" className="text-sm focus:bg-secondary focus:text-foreground">股票</SelectItem>
                 <SelectItem value="amount" className="text-sm focus:bg-secondary focus:text-foreground">市值</SelectItem>
                 <SelectItem value="debt_ratio" className="text-sm focus:bg-secondary focus:text-foreground">负债率</SelectItem>
-                <SelectItem value="peTTM" className="text-sm focus:bg-secondary focus:text-foreground">PE(TTM)</SelectItem>
                 <SelectItem value="holderNum" className="text-sm focus:bg-secondary focus:text-foreground">股东人数</SelectItem>
                 <SelectItem value="daysSinceLimitUp" className="text-sm focus:bg-secondary focus:text-foreground">距涨停日</SelectItem>
                 <SelectItem value="maProximity" className="text-sm focus:bg-secondary focus:text-foreground">5日/30日接近</SelectItem>
-                
                 <SelectItem value="highProximity" className="text-sm focus:bg-secondary focus:text-foreground">前高点接近</SelectItem>
+                <SelectItem value="chg" className="text-sm focus:bg-secondary focus:text-foreground">涨跌幅</SelectItem>
+                <SelectItem value="daysSinceLimitDown" className="text-sm focus:bg-secondary focus:text-foreground">跌停日</SelectItem>
               </SelectContent>
             </Select>
             <Select value={pageSize} onValueChange={(v) => setPageSize(v as "10" | "20" | "50" | "all")}>
@@ -1635,34 +1727,12 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                   <TableHead className="text-muted-foreground w-8">#</TableHead>
                   <TableHead
                     className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("date")}
+                    onClick={() => handleSort("stock")}
                   >
-                    录入日<SortIcon col="date" />
+                    股票<SortIcon col="stock" />
                   </TableHead>
-                  <TableHead
-                    className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("code")}
-                  >
-                    代码<SortIcon col="code" />
-                  </TableHead>
-                  <TableHead
-                    className="text-muted-foreground cursor-pointer select-none whitespace-nowrap hover:text-foreground"
-                    onClick={() => handleSort("name")}
-                  >
-                    名称<SortIcon col="name" />
-                  </TableHead>
-                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[140px]">
-                    板块
-                  </TableHead>
-                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[160px]">
-                    概念
-                  </TableHead>
-                  <TableHead
-                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
-                    onClick={() => handleSort("peTTM")}
-                  >
-                    PE(TTM)
-                    <SortIcon col="peTTM" />
+                  <TableHead className="text-muted-foreground whitespace-nowrap min-w-[200px]">
+                    标签
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
@@ -1670,13 +1740,6 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                   >
                     股东人数
                     <SortIcon col="holderNum" />
-                  </TableHead>
-                  <TableHead
-                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
-                    onClick={() => handleSort("daysSinceLimitUp")}
-                  >
-                    距涨停日
-                    <SortIcon col="daysSinceLimitUp" />
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
@@ -1690,7 +1753,13 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                     )}
                     <SortIcon col="maProximity" />
                   </TableHead>
-                  
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("daysSinceLimitUp")}
+                  >
+                    距涨停日
+                    <SortIcon col="daysSinceLimitUp" />
+                  </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
                     onClick={() => handleSort("highProximity")}
@@ -1705,9 +1774,23 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                   </TableHead>
                   <TableHead
                     className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("chg")}
+                  >
+                    收盘/涨跌
+                    <SortIcon col="chg" />
+                  </TableHead>
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
+                    onClick={() => handleSort("daysSinceLimitDown")}
+                  >
+                    跌停日
+                    <SortIcon col="daysSinceLimitDown" />
+                  </TableHead>
+                  <TableHead
+                    className="text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground"
                     onClick={() => handleSort("gentleWeeklyVolume")}
                   >
-                    温和放量
+                    周线温和放量
                     <SortIcon col="gentleWeeklyVolume" />
                   </TableHead>
                   <TableHead className="text-muted-foreground whitespace-nowrap">
@@ -1719,7 +1802,7 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                 {filtered.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={14}
+                      colSpan={9}
                       className="text-center text-muted-foreground py-12"
                     >
                       暂无数据
@@ -1727,35 +1810,23 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                   </TableRow>
                 ) : (
                   visibleRecords.map((r, i) => {
+                    const code = (r.stock || "").split(" ")[0] || "";
                     return (
                       <TableRow
-                        key={`${r.code}-${r.date}-${i}`}
+                        key={`${r.stock || ""}-${i}`}
                         className="border-border hover:bg-secondary/50"
                       >
                         <TableCell className="text-muted-foreground font-mono text-xs">
                           {i + 1}
                         </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
-                          {r.date}
-                        </TableCell>
-                        <TableCell className="font-mono text-sm whitespace-nowrap">
-                          <a
-                            href={xueqiuQuoteUrl(r.code)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary hover:underline font-medium"
-                          >
-                            {r.code}
-                          </a>
-                        </TableCell>
                         <TableCell className="font-medium whitespace-nowrap">
                           <a
-                            href={xueqiuQuoteUrl(r.code)}
+                            href={xueqiuQuoteUrl(code)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-primary hover:underline"
                           >
-                            {r.name}
+                            {r.stock}
                           </a>
                           <div className="flex items-center gap-1.5 mt-0.5">
                             {r.amount != null && (
@@ -1765,52 +1836,118 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="align-middle min-w-[140px]">
+                        <TableCell className="align-middle min-w-[200px]">
                           <div className="flex flex-wrap gap-2 items-center">
-                            {r.sector.map((s) => (
-                              <span
-                                key={s}
-                                className="inline-flex items-center rounded-md bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary border border-primary/25 whitespace-nowrap"
-                              >
-                                {s}
-                              </span>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell className="align-middle min-w-[160px]">
-                          <div className="flex flex-wrap gap-2 items-center">
-                            {(r.concept ?? []).length > 0 ? (
-                              (r.concept ?? []).map((c) => (
+                            {(r.tags || "").split(/[,，]/).map((t) => {
+                              const tag = t.trim();
+                              if (!tag) return null;
+                              return (
                                 <span
-                                  key={c}
-                                  className="inline-flex items-center rounded-md bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/25 whitespace-nowrap"
+                                  key={tag}
+                                  className="inline-flex items-center rounded-md bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary border border-primary/25 whitespace-nowrap"
                                 >
-                                  {c}
+                                  {tag}
                                 </span>
-                              ))
-                            ) : (
-                              <span className="text-muted-foreground text-xs">-</span>
-                            )}
+                              );
+                            })}
                           </div>
                         </TableCell>
                         <TableCell>
-                          <PECell code={r.code} />
+                          <HolderNumCell code={code} />
                         </TableCell>
                         <TableCell>
-                          <HolderNumCell code={r.code} />
+                          <Ma5Ma30Cell code={code} />
                         </TableCell>
                         <TableCell>
-                          <DaysSinceLimitUpCell code={r.code} />
+                          <DaysSinceLimitUpCell code={code} />
                         </TableCell>
                         <TableCell>
-                          <Ma5Ma30Cell code={r.code} />
-                        </TableCell>
-                        
-                        <TableCell>
-                          <HighProximityCell code={r.code} />
+                          <HighProximityCell code={code} />
                         </TableCell>
                         <TableCell>
-                          <WeeklyVolumePatternCell code={r.code} />
+                          {(() => {
+                            const series = ma5ma30Map[code]?.series;
+                            if (!series || series.length === 0) {
+                              return <span className="text-xs text-muted-foreground">加载中...</span>;
+                            }
+                            
+                            const latest = series[series.length - 1];
+                            const { open, high, low, close, pct_chg } = latest;
+                            
+                            // 计算蜡烛图尺寸
+                            const width = 60;
+                            const height = 80;
+                            const padding = 8;
+                            
+                            // 计算价格范围
+                            const priceRange = high - low;
+                            const scale = (height - padding * 2) / priceRange;
+                            
+                            // 计算蜡烛图位置
+                            const isUp = close >= open;
+                            const bodyTop = Math.max(open, close);
+                            const bodyBottom = Math.min(open, close);
+                            const bodyHeight = Math.max(1, (bodyTop - bodyBottom) * scale);
+                            
+                            // Y坐标（价格越高，Y越小）
+                            const highY = padding + (high - high) * scale;
+                            const lowY = padding + (high - low) * scale;
+                            const bodyTopY = padding + (high - bodyTop) * scale;
+                            
+                            return (
+                              <div className="flex items-center gap-3 min-w-[160px]">
+                                {/* 左侧：收盘价和涨跌幅 */}
+                                <div className="flex flex-col gap-1">
+                                  <span className="font-mono text-xs text-foreground">
+                                    收: {close?.toFixed(2)}
+                                  </span>
+                                  {pct_chg != null && (
+                                    <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md ${pct_chg >= 0 ? 'bg-red-500/15 text-red-600' : 'bg-green-500/15 text-green-600'}`}>
+                                      <span className="text-xs">{pct_chg >= 0 ? '↑' : '↓'}</span>
+                                      <span className="font-mono text-xs font-semibold">
+                                        {pct_chg >= 0 ? '+' : ''}{pct_chg.toFixed(2)}%
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* 右侧：蜡烛图 */}
+                                <svg width={width} height={height} className="block">
+                                  {/* 高低价影线 */}
+                                  <line
+                                    x1={width / 2}
+                                    y1={highY}
+                                    x2={width / 2}
+                                    y2={lowY}
+                                    stroke={isUp ? "#ef4444" : "#22c55e"}
+                                    strokeWidth={2}
+                                  />
+                                  {/* 蜡烛实体 */}
+                                  <rect
+                                    x={width / 2 - 12}
+                                    y={bodyTopY}
+                                    width={24}
+                                    height={bodyHeight}
+                                    fill={isUp ? "#ef4444" : "#22c55e"}
+                                    rx={2}
+                                  />
+                                  {/* 标注价格 */}
+                                  <text x={width - 2} y={highY + 3} fontSize="8" fill="hsl(var(--muted-foreground))" textAnchor="end">
+                                    H: {high.toFixed(2)}
+                                  </text>
+                                  <text x={width - 2} y={lowY + 3} fontSize="8" fill="hsl(var(--muted-foreground))" textAnchor="end">
+                                    L: {low.toFixed(2)}
+                                  </text>
+                                </svg>
+                              </div>
+                            );
+                          })()}
+                        </TableCell>
+                        <TableCell>
+                          <DaysSinceLimitDownCell code={code} />
+                        </TableCell>
+                        <TableCell>
+                          <WeeklyVolumePatternCell code={code} />
                         </TableCell>
                         <TableCell>
                           <Button
@@ -1819,11 +1956,10 @@ function WeeklyVolumePatternCell({ code }: { code: string }) {
                             className="h-7 px-2 text-xs gap-1"
                             onClick={() => {
                               const params = new URLSearchParams({
-                                name: r.name,
-                                sector: r.sector.join(","),
-                                concept: (r.concept ?? []).join(","),
+                                stock: r.stock,
+                                tags: r.tags,
                               });
-                              window.open(`/stock/${r.code}?${params}`, "_blank");
+                              window.open(`/stock/${code}?${params}`, "_blank");
                             }}
                           >
                             <Sparkles className="h-3 w-3 text-amber-500" />

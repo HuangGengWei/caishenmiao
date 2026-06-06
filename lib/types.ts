@@ -1,9 +1,7 @@
 export interface SignalRecord {
-  date: string; // YYYY-MM-DD
-  code: string;
-  name: string;
-  sector: string[];
-  concept?: string[];
+  date: string; // YYYY-MM-DD，日历分组必需
+  stock: string; // 格式: "代码 名称"，如 "000001 平安银行"
+  tags: string; // 板块和概念合并，逗号分隔，如 "银行, 金融科技"
   sector_pattern: "水下拉水上" | "波动三角收窄" | null;
   turnover: number | null;
   chg: number | null; // %
@@ -30,11 +28,9 @@ export interface SectorStat {
 }
 
 export interface StockHistory {
-  code: string;
-  name: string;
-  sectors: string[];
+  stock: string; // 格式: "代码 名称"
+  tags: string[]; // 所有标签历史
   appearances: number;
-  dates: string[];
   avgTurnover: number | null;
   avgScore: number;
   maxScore: number;

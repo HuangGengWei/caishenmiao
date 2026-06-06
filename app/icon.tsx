@@ -13,15 +13,15 @@ export default function Icon() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "linear-gradient(135deg, #d97706 0%, #b45309 100%)",
+          background: "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)",
           borderRadius: 8,
           color: "white",
-          fontSize: 18,
+          fontSize: 16,
           fontWeight: 700,
           fontFamily: "sans-serif",
         }}
       >
-        财
+        啄米
       </div>
     ),
     { ...size }

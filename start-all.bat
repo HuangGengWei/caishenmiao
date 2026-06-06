@@ -21,5 +21,5 @@ cd /d F:\nginx-1.28.2
 start "" nginx.exe
 
 REM 2. 启动 Next.js，监听 3000
-cd /d F:\caishenmiao
+cd /d F:\zhuomi
 call npm run start -- -p 3000

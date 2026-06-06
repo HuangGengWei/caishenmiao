@@ -10,7 +10,7 @@ const DOWNLOADER_PATH = "F:/douyin-downloader-main/douyin-downloader-main"
 const CONFIG_PATH = path.join(DOWNLOADER_PATH, "config.yml")
 
 // 博主配置存储路径
-const BLOGGERS_CONFIG_PATH = "F:/caishenmiao/data/bloggers.json"
+const BLOGGERS_CONFIG_PATH = "F:/zhuomi/data/bloggers.json"
 
 interface BloggerConfig {
   name: string

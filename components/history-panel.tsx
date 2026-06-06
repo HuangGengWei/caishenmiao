@@ -206,13 +206,27 @@ export function HistoryPanel({
     }
   }, [selectedDate, sectorShotVersion]);
 
+  // 从 tags 字段解析标签列表
+  function getTagsList(r: SignalRecord): string[] {
+    return (r.tags || "").split(/[,，]/).map(t => t.trim()).filter(Boolean);
+  }
+
+  // 从 stock 字段解析代码和名称
+  function parseStock(stock: string): { code: string; name: string } {
+    const parts = stock.trim().split(/\s+/);
+    return {
+      code: parts[0] || "",
+      name: parts.slice(1).join(" ") || ""
+    };
+  }
+
   // 当前选中日期下的概念聚合（名称 + 计数），并且合并当天已上传截图但可能暂无个股的概念
   const selectedDateSectors =
     selectedDate && selectedDateData
       ? (() => {
           const conceptMap = new Map<string, { count: number }>();
           for (const r of selectedDateData.records) {
-            for (const c of (r.concept ?? [])) {
+            for (const c of getTagsList(r)) {
               const existing = conceptMap.get(c) ?? { count: 0 };
               existing.count += 1;
               conceptMap.set(c, existing);
@@ -284,7 +298,7 @@ export function HistoryPanel({
     if (!data) return [];
     const conceptSet = new Set<string>();
     for (const r of data.records) {
-      for (const c of (r.concept ?? [])) {
+      for (const c of getTagsList(r)) {
         conceptSet.add(c);
       }
     }
@@ -507,7 +521,7 @@ export function HistoryPanel({
                         {cell.data &&
                           (() => {
                             const totalConcepts = new Set(
-                              cell.data.records.flatMap((r) => r.concept ?? [])
+                              cell.data.records.flatMap((r) => getTagsList(r))
                             ).size;
                             return totalConcepts > 3 ? (
                               <span className="text-[9px] leading-tight text-muted-foreground/60">
@@ -574,46 +588,37 @@ export function HistoryPanel({
                 <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto pr-1">
                   {selectedRecords
                     .filter((r) =>
-                      (r.concept ?? []).includes(selectedSector.split("|")[1])
+                      getTagsList(r).includes(selectedSector.split("|")[1])
                     )
-                    .sort((a, b) => a.code.localeCompare(b.code))
-                    .map((r, i) => (
+                    .sort((a, b) => a.stock.localeCompare(b.stock))
+                    .map((r, i) => {
+                      const { code, name } = parseStock(r.stock);
+                      const tags = getTagsList(r);
+                      return (
                       <div
-                        key={`${r.code}-${i}`}
+                        key={`${r.stock}-${i}`}
                         className="group relative flex items-start justify-between gap-4 rounded-lg border-2 border-border bg-gradient-to-br from-card to-secondary/30 px-4 py-3 shadow-sm hover:shadow-md hover:border-primary/40 transition-all"
                       >
                         <div className="flex flex-col gap-2 min-w-0 flex-1">
-                          {/* 第一行：代码、名称、标签 */}
+                          {/* 第一行：代码、名称 */}
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono text-base font-bold text-foreground tracking-wide">
-                              {r.code}
+                              {code}
                             </span>
                             <span className="font-semibold text-base text-foreground">
-                              {r.name}
+                              {name}
                             </span>
                           </div>
                           
-                          {/* 第二行：板块标签 */}
-                          <div className="flex items-center flex-wrap gap-1.5">
-                            {r.sector.map((s) => (
-                              <span
-                                key={s}
-                                className="text-xs px-2 py-1 rounded-md bg-primary/15 text-primary font-medium border border-primary/20"
-                              >
-                                {s}
-                              </span>
-                            ))}
-                          </div>
-                          
-                          {/* 第三行：概念标签 */}
-                          {(r.concept ?? []).length > 0 && (
+                          {/* 第二行：标签 */}
+                          {tags.length > 0 && (
                             <div className="flex items-center flex-wrap gap-1.5">
-                              {(r.concept ?? []).map((c) => (
+                              {tags.map((t) => (
                                 <span
-                                  key={c}
-                                  className="text-xs px-2 py-1 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 font-medium border border-amber-500/20"
+                                  key={t}
+                                  className="text-xs px-2 py-1 rounded-md bg-primary/15 text-primary font-medium border border-primary/20"
                                 >
-                                  {c}
+                                  {t}
                                 </span>
                               ))}
                             </div>
@@ -648,7 +653,8 @@ export function HistoryPanel({
                           </div>
                         </div>
                       </div>
-                    ))}
+                    );
+                  })}
                 </div>
               </div>
             ) : selectedDate ? (

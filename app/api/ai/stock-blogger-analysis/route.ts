@@ -32,6 +32,20 @@ interface MarketData {
   ma10: number | null;
   ma20: number | null;
   ma30: number | null;
+  // 新增技术指标
+  volRatio?: number;
+  maPattern?: string;
+  recentPatterns?: string[];
+  pricePosition?: string;
+  recent5Days?: Array<{
+    date: string;
+    open: number;
+    close: number;
+    high: number;
+    low: number;
+    vol: number;
+    change: string;
+  }>;
 }
 
 interface BloggerProfile {
@@ -116,6 +130,63 @@ async function fetchMarketData(code: string): Promise<MarketData | null> {
       return Math.round(slice.reduce((s, r) => s + (r.vol || 0), 0) / days);
     };
     
+    // 计算量价关系指标
+    const calcVolRatio = (): number => {
+      if (calcVolMA(5) === 0) return 0;
+      return Math.round((latest.vol || 0) / calcVolMA(5) * 100) / 100;
+    };
+    
+    // 判断均线排列（多头/空头）
+    const ma5Val = calcMA(5);
+    const ma10Val = calcMA(10);
+    const ma20Val = calcMA(20);
+    const ma30Val = calcMA(30);
+    const getMaPattern = (): string => {
+      if (ma5Val && ma10Val && ma20Val && ma30Val) {
+        if (ma5Val > ma10Val && ma10Val > ma20Val && ma20Val > ma30Val) return "多头排列";
+        if (ma5Val < ma10Val && ma10Val < ma20Val && ma20Val < ma30Val) return "空头排列";
+        return "交叉/混乱";
+      }
+      return "数据不足";
+    };
+    
+    // 计算近期K线形态特征
+    const getRecentPattern = (): string[] => {
+      const patterns: string[] = [];
+      const recent5 = sorted.slice(0, 5);
+      
+      // 判断上影线/下影线
+      const today = recent5[0];
+      const upperShadow = today.high - Math.max(today.open, today.close);
+      const lowerShadow = Math.min(today.open, today.close) - today.low;
+      const body = Math.abs(today.close - today.open);
+      
+      if (upperShadow > body * 2 && body > 0) patterns.push("长上影线(试盘信号)");
+      if (lowerShadow > body * 2 && body > 0) patterns.push("长下影线(支撑信号)");
+      
+      // 判断连续涨跌
+      const upDays = recent5.filter(d => d.close > d.open).length;
+      if (upDays >= 4) patterns.push("连续阳线(强势)");
+      if (upDays <= 1) patterns.push("连续阴线(弱势)");
+      
+      // 判断放量/缩量
+      const avgVol5 = calcVolMA(5);
+      if (latest.vol > avgVol5 * 2) patterns.push("放量(活跃)");
+      if (latest.vol < avgVol5 * 0.5) patterns.push("缩量(观望)");
+      
+      return patterns;
+    };
+    
+    // 计算价格位置（相对于近期高低点）
+    const getPricePosition = (): string => {
+      const rangeHigh = monthHigh;
+      const rangeLow = monthLow;
+      const position = (latestClose - rangeLow) / (rangeHigh - rangeLow) * 100;
+      if (position > 80) return "高位区域(接近月高)";
+      if (position < 20) return "低位区域(接近月低)";
+      return "中间区域";
+    };
+    
     return {
       latestClose,
       latestHigh: latest.high,
@@ -131,10 +202,25 @@ async function fetchMarketData(code: string): Promise<MarketData | null> {
       avgVol5: calcVolMA(5),
       avgVol10: calcVolMA(10),
       latestVol: latest.vol || 0,
-      ma5: calcMA(5),
-      ma10: calcMA(10),
-      ma20: calcMA(20),
-      ma30: calcMA(30),
+      ma5: ma5Val,
+      ma10: ma10Val,
+      ma20: ma20Val,
+      ma30: ma30Val,
+      // 新增技术指标
+      volRatio: calcVolRatio(),
+      maPattern: getMaPattern(),
+      recentPatterns: getRecentPattern(),
+      pricePosition: getPricePosition(),
+      // 新增近期K线数据（供AI分析形态）
+      recent5Days: recent5.map(d => ({
+        date: d.trade_date,
+        open: d.open,
+        close: d.close,
+        high: d.high,
+        low: d.low,
+        vol: d.vol,
+        change: ((d.close - d.pre_close) / d.pre_close * 100).toFixed(2)
+      }))
     };
   } catch (e) {
     console.error("fetchMarketData error:", e);
@@ -230,21 +316,40 @@ function buildBloggerAnalysisPrompt(
   
   let marketDataSection = "";
   if (marketData) {
+    // 近5日K线数据表格
+    let recentKlineTable = "";
+    if (marketData.recent5Days && marketData.recent5Days.length > 0) {
+      recentKlineTable = `
+### 近5日K线数据（重点分析）
+| 日期 | 开盘 | 收盘 | 最高 | 最低 | 成交量(万手) | 涨跌幅 |
+|------|------|------|------|------|-------------|--------|
+${marketData.recent5Days.map(d => 
+  `| ${d.date} | ${d.open} | ${d.close} | ${d.high} | ${d.low} | ${Math.round(d.vol/10000)} | ${d.change}% |`
+).join("\n")}
+`;
+    }
+    
     marketDataSection = `
-## 实时行情数据
+## 实时行情数据（Tushare提供）
+### 基础行情
 - 最新收盘价: ${marketData.latestClose} 元
 - 最新交易日: ${marketData.latestDate}
-- 今日最高/最低: ${marketData.latestHigh} / ${marketData.latestLow} 元
+- 今日开盘/最高/最低: ${marketData.latestOpen} / ${marketData.latestHigh} / ${marketData.latestLow} 元
 - 近一周涨跌幅: ${marketData.weekChange > 0 ? "+" : ""}${marketData.weekChange}%
 - 近一月涨跌幅: ${marketData.monthChange > 0 ? "+" : ""}${marketData.monthChange}%
-- 近一周最高/最低: ${marketData.weekHigh} / ${marketData.weekLow} 元
-- 近一月最高/最低: ${marketData.monthHigh} / ${marketData.monthLow} 元
-- 5日均线(MA5): ${marketData.ma5 ?? "暂无"} 元
-- 10日均线(MA10): ${marketData.ma10 ?? "暂无"} 元
-- 20日均线(MA20): ${marketData.ma20 ?? "暂无"} 元
-- 30日均线(MA30): ${marketData.ma30 ?? "暂无"} 元
+
+### 技术指标分析
+- 均线系统: MA5=${marketData.ma5 ?? "暂无"}, MA10=${marketData.ma10 ?? "暂无"}, MA20=${marketData.ma20 ?? "暂无"}, MA30=${marketData.ma30 ?? "暂无"}
+- 均线排列形态: ${marketData.maPattern || "数据不足"}
+- 价格位置: ${marketData.pricePosition || "未知"}
+- 量比(当日/5日均量): ${marketData.volRatio || 0}（>1.5为放量，<0.5为缩量）
+- K线形态信号: ${marketData.recentPatterns?.join("、") || "无明显信号"}
+
+### 成交量分析
 - 最新成交量: ${Math.round(marketData.latestVol / 10000)} 万手
 - 5日均量: ${Math.round(marketData.avgVol5 / 10000)} 万手
+- 10日均量: ${Math.round(marketData.avgVol10 / 10000)} 万手
+${recentKlineTable}
 `;
   }
 
@@ -266,11 +371,31 @@ ${marketDataSection}
 
 请以"${bloggerName}"的视角和语气，分析这只股票。你需要：
 
-1. **判断当前阶段**：这只股票目前处于主力运作的哪个阶段？（建仓、洗盘、拉升、出货）
-2. **识别资金行为**：从K线形态、量价关系判断主力意图
-3. **匹配交易模式**：是否符合博主的某个核心交易模式？如符合，给出具体分析
-4. **风险警示**：用博主的方式提醒潜在风险（如"利好兑现"、"低位补涨"等信号）
+1. **判断当前阶段**：这只股票目前处于主力运作的哪个阶段？（建仓、洗盘、拉升、出货、无主力关注）
+
+2. **识别资金行为**：根据K线数据判断主力意图
+   - 观察量价关系（放量涨/缩量涨/放量跌/缩量跌）
+   - 分析K线形态（上影线/下影线/十字星/大阳大阴）
+   - 判断均线排列（多头/空头/纠缠）
+
+3. **匹配交易模式**：**严格按照以下条件判断**，如不符合任何模式，填"当前不符合任何交易模式"
+   
+   - **低位试盘启动模式**：需满足【低位 + 长上影线 + 缩量横盘未破低 + 均线多头】
+   - **利好兑现模式（卖出）**：需满足【涨幅超50%出利好 + 股价滞涨】
+   - **跌停板翘板模式**：需满足【跌停板 + 尾盘大单翘板】
+   - **打板回封模式**：需满足【涨停开板 + 未放巨量 + 板块效应存在】
+   - **休克交易抄底模式**：需满足【低位 + 缩量阴跌不破成本区 + 主力建仓完成】
+   - **主升浪持股模式**：需满足【涨幅30%-50%后 + 均线多头排列 + 斜率变陡】
+
+4. **风险警示**：用博主的方式提醒潜在风险
+
 5. **操作建议**：给出符合博主体系的操作建议
+
+**重要提示**：
+- 如果股票处于高位（接近月高），优先考虑"利好兑现"或"出货"风险
+- 如果股票处于低位（接近月低），可以关注"试盘"或"建仓"信号
+- 如果无明显主力行为，建议"观望"
+- 不要强行匹配模式，必须严格对照条件
 
 **请用博主惯用的语言风格回答**，比如：
 - 使用"主力"、"筹码"、"洗盘"、"出货"等术语
@@ -280,14 +405,15 @@ ${marketDataSection}
 
 输出格式如下（JSON）：
 {
-  "当前阶段判断": "建仓期/洗盘期/拉升期/出货期/观望",
-  "主力意图分析": "具体分析主力当前行为",
-  "匹配的交易模式": "如果符合某个模式，说明是哪个",
+  "当前阶段判断": "建仓期/洗盘期/拉升期/出货期/无主力/观望",
+  "主力意图分析": "根据K线数据和量价关系的具体分析",
+  "匹配的交易模式": "如果符合某个模式，说明是哪个及原因；如不符合，填'当前不符合任何交易模式'",
+  "模式匹配理由": "具体说明为什么符合或不符合（对照模式条件逐一分析）",
   "关键观察点": ["需要关注的几个关键信号"],
   "风险警示": ["用博主视角指出的风险"],
   "操作建议": {
     "是否可介入": "是/否/观望",
-    "介入时机": "具体时机说明",
+    "介入时机": "具体时机说明（如符合某个模式，说明等待什么信号）",
     "仓位建议": "轻仓/半仓/重仓/空仓",
     "止损策略": "具体止损策略",
     "目标预期": "预期目标"

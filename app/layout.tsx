@@ -8,8 +8,8 @@ const _noto = Noto_Sans_SC({ subsets: ['latin'], weight: ['400', '500', '600', '
 const _jetbrains = JetBrains_Mono({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: '财神庙',
-  description: '财神庙 - 板块分时信号记录与可视化',
+  title: '啄米',
+  description: '啄米 - 精准捕捉每一个信号，积少成多。个股信号记录与可视化工具。',
 }
 
 export const viewport: Viewport = {
