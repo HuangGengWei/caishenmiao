@@ -104,6 +104,9 @@ interface WeeklyVolumePatternInfo {
 interface HighPointInfo {
   price: number;
   date: string;
+  startDate?: string;
+  endDate?: string;
+  days?: number;
   proximityPercent: number;
   aboveOrBelow: "above" | "below" | "equal";
 }
@@ -795,12 +798,15 @@ export function StocksPage({ records }: StocksPageProps) {
             const code = getCode(r);
             const s = highProximityMap[code];
             if (!s || !s.highPoints || s.highPoints.length === 0) return null;
-            // 使用最近的前高点距离
-            const nearest = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
-            return nearest.proximityPercent;
+            // 使用第一个平台的距离（真突破/假突破判断）
+            return s.highPoints[0].proximityPercent;
           };
           av = getProximity(a);
           bv = getProximity(b);
+          // 降序：真突破（正值）在前，假突破（负值）在后
+          if (sortDir === "asc") {
+            [av, bv] = [bv, av];
+          }
           break;
         }
         case "chg": {
@@ -904,8 +910,15 @@ export function StocksPage({ records }: StocksPageProps) {
   const processQueue = useCallback(async () => {
     if (requestQueueRef.current.processing) return;
     requestQueueRef.current.processing = true;
+    const startVersion = requestVersionRef.current;
 
     while (requestQueueRef.current.queue.length > 0) {
+      // 版本变化时停止处理（搜索条件已变化）
+      if (requestVersionRef.current !== startVersion) {
+        requestQueueRef.current.processing = false;
+        return;
+      }
+      
       // 检查是否需要暂停
       const now = Date.now();
       if (requestQueueRef.current.paused && now < requestQueueRef.current.pauseUntil) {
@@ -921,7 +934,10 @@ export function StocksPage({ records }: StocksPageProps) {
       if (task) {
         try {
           await task();
-          setQueueCompleted((c) => c + 1);
+          // 再次检查版本，避免更新旧数据
+          if (requestVersionRef.current === startVersion) {
+            setQueueCompleted((c) => c + 1);
+          }
         } catch (e) {
           console.error("队列任务执行失败:", e);
         }
@@ -973,14 +989,26 @@ export function StocksPage({ records }: StocksPageProps) {
     [processQueue]
   );
 
+  // 版本号：当搜索条件变化时递增，用于取消旧请求
+  const requestVersionRef = useRef(0);
+  
   const fetchedMa5Ma30Ref = useRef<Set<string>>(new Set());
   const fetchedLimitUpRef = useRef<Set<string>>(new Set());
   const fetchedLimitDownRef = useRef<Set<string>>(new Set());
   const fetchedHighProximityRef = useRef<Set<string>>(new Set());
   const fetchedWeeklyVolumeRef = useRef<Set<string>>(new Set());
 
-  // 当筛选条件变化时，清除已获取缓存，避免重复获取不在当前筛选结果中的股票
+  // 当筛选条件变化时，清除已获取缓存，并取消旧请求
   useEffect(() => {
+    // 递增版本号
+    requestVersionRef.current += 1;
+    // 清空队列
+    requestQueueRef.current.queue = [];
+    // 重置进度
+    setQueueTotal(0);
+    setQueueCompleted(0);
+    setQueuePaused(false);
+    // 清除缓存
     fetchedMa5Ma30Ref.current.clear();
     fetchedLimitUpRef.current.clear();
     fetchedLimitDownRef.current.clear();
@@ -1464,36 +1492,49 @@ export function StocksPage({ records }: StocksPageProps) {
       return <span className="text-xs text-muted-foreground">-</span>;
     }
 
-    // 获取最近的前高点
-    const nearestHigh = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
-    const isAbove = nearestHigh.proximityPercent >= 0; // 正值=突破，负值=假摔
-    const absProximity = Math.abs(nearestHigh.proximityPercent);
+    // 获取第二个平台作为假摔判断依据
+    const signalHigh = s.nearestHighIndex >= 0 ? s.highPoints[s.nearestHighIndex] : s.highPoints[0];
+    const firstPlatform = s.highPoints[0]; // 第一个平台（假突破）
+    const isAbove = signalHigh.proximityPercent >= 0;
+    const absProximity = Math.abs(signalHigh.proximityPercent);
     const isNear = absProximity <= 5;
     const isVeryNear = absProximity <= 2;
+    const hasSignal = isVeryNear;
 
     return (
       <div className="flex flex-col gap-0.5 min-w-[120px]">
         <div className="flex items-center gap-1.5">
-          <span className={`font-mono text-xs font-semibold ${isAbove ? 'text-red-600' : 'text-green-600'}`}>
-            {isAbove ? '+' : ''}{nearestHigh.proximityPercent.toFixed(2)}%
+          <span className={`font-mono text-xs font-semibold ${firstPlatform.proximityPercent >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+            {firstPlatform.proximityPercent >= 0 ? '+' : ''}{firstPlatform.proximityPercent.toFixed(2)}%
           </span>
-          {isVeryNear && (
-            <Badge className={`text-[10px] px-1.5 py-0 h-5 font-semibold ${isAbove ? 'bg-red-500/20 text-red-600 border-red-500/40' : 'bg-green-500/20 text-green-600 border-green-500/40'}`}>
-              {isAbove ? '真突破' : '假摔'}
-            </Badge>
-          )}
-          {isNear && !isVeryNear && (
-            <Badge className={`text-[10px] px-1.5 py-0 h-5 font-semibold ${isAbove ? 'bg-red-500/20 text-red-600 border-red-500/40' : 'bg-green-500/20 text-green-600 border-green-500/40'}`}>
-              {isAbove ? '接近突破' : '接近支撑'}
-            </Badge>
-          )}
+          <Badge className={`text-[10px] px-1.5 py-0 h-5 font-semibold ${firstPlatform.proximityPercent >= 0 ? 'bg-red-500/20 text-red-600 border-red-500/40' : 'bg-green-500/20 text-green-600 border-green-500/40'}`}>
+            {firstPlatform.proximityPercent >= 0 ? '真突破' : '假突破'}
+          </Badge>
         </div>
-        <div className="text-[10px] text-muted-foreground leading-tight">
-          {s.highPoints.map((hp, idx) => (
-            <div key={idx} className={idx === s.nearestHighIndex ? "text-foreground font-medium" : ""}>
-              第{idx + 1}高: {hp.price.toFixed(2)} ({hp.date}) {hp.proximityPercent >= 0 ? '+' : ''}{hp.proximityPercent.toFixed(1)}%
-            </div>
-          ))}
+        <div className={`text-[10px] leading-tight ${hasSignal ? 'bg-yellow-50 dark:bg-yellow-900/20 p-1 rounded' : 'text-muted-foreground'}`}>
+          {s.highPoints.map((hp, idx) => {
+            const isFirstPlatform = idx === 0;
+            const isSecondPlatform = idx === 1 && s.highPoints.length >= 2;
+            // 判断是否接近第二个平台（跌幅 <= 5%）
+            const isNearSecondPlatform = isSecondPlatform && Math.abs(hp.proximityPercent) <= 5;
+            
+            // 格式化时间范围和天数
+            const dateRange = hp.startDate && hp.endDate 
+              ? `${hp.startDate}~${hp.endDate}` 
+              : hp.date;
+            const daysInfo = hp.days ? `${hp.days}天` : '';
+            
+            return (
+              <div key={idx} className={
+                isNearSecondPlatform
+                  ? "text-green-600 font-bold text-xs"
+                  : ""
+              }>
+                第{idx + 1}高: {hp.price.toFixed(2)} ({dateRange}{daysInfo && `, ${daysInfo}`}) {hp.proximityPercent >= 0 ? '+' : ''}{hp.proximityPercent.toFixed(1)}%
+                {isNearSecondPlatform && <span className="text-green-600 ml-1">接近支撑</span>}
+              </div>
+            );
+          })}
           <div>最新: {s.latestClose?.toFixed(2)}</div>
         </div>
       </div>

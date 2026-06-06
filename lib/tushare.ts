@@ -1217,7 +1217,10 @@ export async function getStockInfo(
  */
 export type HighPoint = {
   price: number;           // 高点价格
-  date: string;            // 高点日期 YYYY-MM-DD
+  date: string;            // 高点日期 YYYY-MM-DD（结束日期）
+  startDate?: string;      // 平台开始日期 YYYY-MM-DD
+  endDate?: string;        // 平台结束日期 YYYY-MM-DD
+  days?: number;           // 平台持续天数
   proximityPercent: number; // 收盘价相对于该高点的百分比（正=突破，负=假摔）
   aboveOrBelow: "above" | "below" | "equal"; // 收盘价与该高点关系
 };
@@ -1252,95 +1255,152 @@ export async function getHighProximity(
     return null;
   }
 
-  // 按日期正序排列，并记录每个交易日的索引
+  // 按日期正序排列
   const sorted = [...rows].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
 
   // 格式化日期 YYYYMMDD → YYYY-MM-DD
   const formatDate = (ymd: string) =>
     `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
 
-  // 筹码集中度检测：找出成交量最密集的价格区间
-  // 分析最近60个交易日的量价分布
-  const ANALYSIS_DAYS = 60;
-  const analysisData = sorted.slice(-ANALYSIS_DAYS);
+  // 自适应平台识别算法
+  // 平台定义：价格在一定区间内横盘整理，波动幅度较小
+  const highPointsRaw: { price: number; date: string; startDate: string; endDate: string; volume: number }[] = [];
   
-  if (analysisData.length < 20) {
-    return null;
-  }
-
-  // 找出价格范围，分成若干档位
-  const allHighs = analysisData.map(d => d.high).filter(v => typeof v === 'number' && v > 0);
-  const allLows = analysisData.map(d => d.low).filter(v => typeof v === 'number' && v > 0);
-  const priceMax = Math.max(...allHighs);
-  const priceMin = Math.min(...allLows);
-  const priceRange = priceMax - priceMin;
+  // 只分析最近180天的数据，避免找到太老的平台
+  const MAX_SEARCH_DAYS = 180;
+  const searchStartIdx = Math.max(0, sorted.length - MAX_SEARCH_DAYS);
   
-  // 分成20档，每档约5%的价格区间
-  const NUM_BUCKETS = 20;
-  const bucketSize = priceRange / NUM_BUCKETS;
+  // 找所有横盘区间（价格波动≤阈值）
+  const PLATFORM_THRESHOLD = 0.08; // 平台波动阈值：8%
+  const MIN_PLATFORM_DAYS = 5; // 最少持续天数
+  const MAX_SKIP_DAYS = 2; // 允许跳过的异常天数
   
-  // 统计每个价格档位的成交量
-  const volumeByBucket: { volume: number; highPrice: number; lowPrice: number; days: number; lastDate: string }[] = [];
+  const allPlatforms: { price: number; startDate: string; endDate: string; volume: number; lowPrice: number; highPrice: number; startIndex: number; endIndex: number }[] = [];
   
-  for (let b = 0; b < NUM_BUCKETS; b++) {
-    const lowPrice = priceMin + b * bucketSize;
-    const highPrice = priceMin + (b + 1) * bucketSize;
-    let totalVolume = 0;
-    let days = 0;
-    let lastDate = '';
+  // 用滑动窗口识别连续横盘区（允许跳过少量异常天）
+  for (let start = searchStartIdx; start < sorted.length - MIN_PLATFORM_DAYS; start++) {
+    let platformHigh = sorted[start].high;
+    let platformLow = sorted[start].low;
+    let platformVolume = sorted[start].vol || 0;
+    let platformEndIdx = start;
+    let skipCount = 0;
     
-    for (const d of analysisData) {
-      // 如果当日价格区间与此档位有重叠
-      if (typeof d.high === 'number' && typeof d.low === 'number' && d.high >= lowPrice && d.low <= highPrice) {
-        totalVolume += d.vol || 0;
-        days++;
-        if (d.trade_date > lastDate) lastDate = d.trade_date;
+    // 向后扩展，允许跳过少量异常天
+    for (let j = start + 1; j < sorted.length; j++) {
+      const d = sorted[j];
+      if (typeof d.high !== 'number' || typeof d.low !== 'number') continue;
+      
+      const newHigh = Math.max(platformHigh, d.high);
+      const newLow = Math.min(platformLow, d.low);
+      const range = (newHigh - newLow) / newLow;
+      
+      if (range <= PLATFORM_THRESHOLD) {
+        platformHigh = newHigh;
+        platformLow = newLow;
+        platformVolume += d.vol || 0;
+        platformEndIdx = j;
+        skipCount = 0; // 重置跳过计数
+      } else if (skipCount < MAX_SKIP_DAYS) {
+        skipCount++; // 允许跳过异常天
+      } else {
+        break; // 连续异常超阈值，停止扩展
       }
     }
     
-    volumeByBucket.push({
-      volume: totalVolume,
-      highPrice,
-      lowPrice,
-      days,
-      lastDate,
+    const days = platformEndIdx - start + 1;
+    
+    // 如果有效天数够多，记录平台
+    if (days >= MIN_PLATFORM_DAYS) {
+      // 检查是否与已有平台重叠
+      const overlaps = allPlatforms.some(p => {
+        const overlapStart = Math.max(p.startIndex, start);
+        const overlapEnd = Math.min(p.endIndex, platformEndIdx);
+        return overlapEnd > overlapStart;
+      });
+      
+      if (!overlaps) {
+        allPlatforms.push({
+          price: Math.round(platformHigh * 100) / 100,
+          startDate: sorted[start].trade_date,
+          endDate: sorted[platformEndIdx].trade_date,
+          volume: platformVolume,
+          lowPrice: platformLow,
+          highPrice: platformHigh,
+          startIndex: start,
+          endIndex: platformEndIdx,
+          days: days,
+        });
+      }
+    }
+  }
+  
+  // 按结束日期从新到旧排序
+  allPlatforms.sort((a, b) => b.endIndex - a.endIndex);
+  
+  // 选前3个时间不重叠的平台（时间最近的优先，不要求时间间隔）
+  const selectedPlatforms: typeof allPlatforms = [];
+  for (const platform of allPlatforms) {
+    if (selectedPlatforms.length >= 3) break;
+    
+    // 检查是否与已选平台时间重叠（允许紧邻但不重叠）
+    const overlaps = selectedPlatforms.some(sp => {
+      const overlapStart = Math.max(sp.startIndex, platform.startIndex);
+      const overlapEnd = Math.min(sp.endIndex, platform.endIndex);
+      return overlapEnd > overlapStart; // 有实际重叠才排除
+    });
+    
+    if (!overlaps) {
+      selectedPlatforms.push(platform);
+    }
+  }
+  
+  // 转换为结果格式
+  for (const platform of selectedPlatforms) {
+    highPointsRaw.push({
+      price: platform.price,
+      date: platform.endDate,
+      startDate: platform.startDate,
+      endDate: platform.endDate,
+      volume: platform.volume,
+      days: platform.days,
     });
   }
-  
-  // 按成交量降序，找出筹码最集中的3个档位
-  volumeByBucket.sort((a, b) => b.volume - a.volume);
-  const topBuckets = volumeByBucket.slice(0, 3);
-  
-  // 将筹码集中区转换为前高点
-  const highPointsRaw: { price: number; date: string; index: number; amplitude: number }[] = [];
-  
-  for (const bucket of topBuckets) {
-    if (bucket.volume > 0 && bucket.days >= 5) {
-      // 筹码集中区的上沿作为"前高"
-      highPointsRaw.push({
-        price: Math.round(bucket.highPrice * 100) / 100,
-        date: bucket.lastDate,
-        index: 0,
-        amplitude: Math.round(((bucket.highPrice - bucket.lowPrice) / bucket.highPrice) * 100 * 100) / 100,
-      });
-    }
-  }
 
-  // 如果筹码分析失败，回退到前高点检测
+  // 如果平台识别失败，回退到前高点检测
   if (highPointsRaw.length === 0) {
     const MIN_GAP_DAYS = 20;
-    const candidates = sorted
-      .map((r, idx) => ({ price: r.high, date: r.trade_date, index: idx }))
-      .filter(r => typeof r.price === "number" && r.price > 0)
-      .sort((a, b) => b.price - a.price);
-
-    for (const c of candidates) {
-      const hasNearby = highPointsRaw.some(h => 
-        Math.abs(h.index - c.index) < MIN_GAP_DAYS
-      );
-      if (!hasNearby) {
-        highPointsRaw.push({ price: c.price, date: c.date, index: c.index, amplitude: 0 });
-        if (highPointsRaw.length >= 3) break;
+    const usedIndices: number[] = [];
+    
+    // 从最新往前找前高点
+    for (let i = sorted.length - 1; i >= 0 && highPointsRaw.length < 3; i--) {
+      const r = sorted[i];
+      if (typeof r.high !== "number" || r.high <= 0) continue;
+      
+      // 检查是否与已选高点太近
+      const tooClose = usedIndices.some(idx => Math.abs(idx - i) < MIN_GAP_DAYS);
+      if (tooClose) continue;
+      
+      // 检查是否是局部高点（前后5天内的最高点）
+      const startIdx = Math.max(0, i - 5);
+      const endIdx = Math.min(sorted.length - 1, i + 5);
+      let isLocalHigh = true;
+      for (let j = startIdx; j <= endIdx; j++) {
+        if (sorted[j].high > r.high) {
+          isLocalHigh = false;
+          break;
+        }
+      }
+      
+      if (isLocalHigh) {
+        highPointsRaw.push({
+          price: r.high,
+          date: r.trade_date,
+          startDate: r.trade_date,
+          endDate: r.trade_date,
+          volume: r.vol || 0,
+          days: 1,
+        });
+        usedIndices.push(i);
       }
     }
   }
@@ -1349,8 +1409,12 @@ export async function getHighProximity(
     return null;
   }
 
-  // 按价格降序（最高的前高在前）
-  highPointsRaw.sort((a, b) => b.price - a.price);
+  // 按结束日期从新到旧排序（第一个平台是最新的）
+  highPointsRaw.sort((a, b) => {
+    const dateA = a.endDate || a.date;
+    const dateB = b.endDate || b.date;
+    return dateB.localeCompare(dateA);
+  });
 
   // 最新收盘价（最后一条记录）
   const latest = sorted[sorted.length - 1];
@@ -1380,13 +1444,16 @@ export async function getHighProximity(
     return {
       price: Math.round(h.price * 100) / 100,
       date: formatDate(h.date),
+      startDate: h.startDate ? formatDate(h.startDate) : undefined,
+      endDate: h.endDate ? formatDate(h.endDate) : undefined,
+      days: h.days,
       proximityPercent: Math.round(proximityPercent * 100) / 100,
       aboveOrBelow,
     };
   });
 
-  // 最近日期的平台是第一个（索引0），作为主要参考
-  const nearestHighIndex = 0;
+  // 假摔信号依据第二个平台（索引1），如果没有第二个平台则用第一个
+  const nearestHighIndex = highPoints.length >= 2 ? 1 : 0;
 
   return {
     highPoints,
